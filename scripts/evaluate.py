@@ -23,8 +23,10 @@ OPTIONS:
 # Imports
 from __future__ import unicode_literals, print_function
 
+from collections import defaultdict
 import argparse
 import re
+import sys
 
 ##################################################################
 # Variables and Constants
@@ -90,15 +92,15 @@ def main():
     argparser.add_argument("-v", "--verbose", help = "output errors",
                            action = "store_true")
     argparser.add_argument("files", help = """input files with predictions
-in TSV format""", type = argpars.FileType('r'), nargs = '*', default = ['-'])
+in TSV format""", type = argparse.FileType('r'), nargs = '*', default = [sys.stdin])
     args = argparser.parse_args()
 
     # estimate MAE on each file
     macro_MAE = micro_MAE = 0.
     for ifile in args.files:
         macro_MAE, micro_MAE = evaluate(ifile, args.verbose)
-        print("{:15s}{:.2%}".format("Macro-averaged MAE:", macro_MAE), file = sys.stderr)
-        print("{:15s}{:.2%}".format("Micro-averaged MAE:", micro_MAE), file = sys.stderr)
+        print("{:20s}{:.5%}".format("Macro-averaged MAE:", macro_MAE), file = sys.stderr)
+        print("{:20s}{:.5%}".format("Micro-averaged MAE:", micro_MAE), file = sys.stderr)
 
 ##################################################################
 # Main
