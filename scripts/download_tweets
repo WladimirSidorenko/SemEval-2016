@@ -1,0 +1,102 @@
+#!/usr/bin/env python2.7
+# -*- mode: python, coding: utf-8; -*-
+
+##################################################################
+# Libraries
+from __future__ import print_function, unicode_literals
+from tweepy.error import TweepError
+from time import sleep
+
+import argparse
+import json
+import os
+import re
+import sys
+import threading
+import tweepy
+
+##################################################################
+# Constants and Variables
+ENCODING = "utf-8"
+SPACES_RE = re.compile(r"\s\s+")
+TAB_RE = re.compile(r"\t+")
+RS_RE = re.compile(r"[\r\n]+")
+# My authentication data
+# CONSUMER_KEY = r"RPdBGuLluj0IdWv8OWE7lQ"
+# CONSUMER_SECRET = r"vKyITMoNNcZnXEim87pLaoun1Y5cZRQbrmxaqj9StZ0"
+# Authentication data of Alan Ritter
+CONSUMER_KEY = r"JEdRRoDsfwzCtupkir4ivQ"
+CONSUMER_SECRET = r"PAbSSmzQxbcnkYYH2vQpKVSq2yPARfKm0Yl6DrLc"
+
+##################################################################
+# Methods
+def _get_text(a_tweet):
+    """Extract and normalize text from Twitter JSON object.
+
+    @param a_tweet - JSON object representing tweet
+
+    @return tweet message as a string
+
+    """
+    t = a_tweet.text
+    # replace "\n" with space
+    t = RS_RE.sub(' ', t).strip()
+    # squeeze contiguous spaces
+    return SPACES_RE.sub(' ', t)
+
+def download_tweets(a_ifiles):
+    """Download tweets from the web.
+
+    @param a_ifiles - input files containing tweet ids
+
+    @return \c void
+    """
+    # authenticate at Twitter
+    auth = tweepy.OAuthHandler(CONSUMER_KEY, CONSUMER_SECRET)
+    api = tweepy.API(auth)
+    # fetch messages
+    i = 0
+    t_id = 0; ifields = t_msg = None
+    for ifile in a_ifiles:
+        for iline in ifile:
+            # due to limitations of the rate limit, we have to sleep
+            # for 15' after fetching every 180 messages
+            if i == 180:
+                sleep(15 * 60)
+                i = 0
+            iline = iline.strip()
+            ifields = TAB_RE.split(iline)
+            if len(ifields) != 3:
+                continue
+            t_id = int(ifields[1])
+            i += 1
+            # obtain tweet by its `id`
+            try:
+                t_msg = api.get_status(t_id)
+            except TweepError as e:
+                print("WARNING: fetching message {:d} failed".format(t_id), file = sys.stderr)
+                print("WARNING: {:s}".format(e.message).encode(ENCODING), file = sys.stderr)
+                continue
+            ifields.append(_get_text(t_msg))
+            print('\t'.join(ifields).encode(ENCODING))
+
+def main():
+    """Main method for downloading tweets from the web
+
+    @return 0 on success, non-0 otherwise
+
+    """
+    # set up and process arguments
+    argparser = argparse.ArgumentParser()
+    argparser.description = """Script for downloading tweets."""
+    argparser.add_argument("tsv_files", help = "TSV files containing id's of tweets to be downloaded", \
+                           nargs = '*', default = ['-'], type = argparse.FileType('r'))
+    args = argparser.parse_args()
+    # download tweets
+    download_tweets(args.tsv_files)
+    return 0
+
+##################################################################
+# Main
+if __name__ == "__main__":
+    main()
