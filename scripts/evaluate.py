@@ -74,7 +74,8 @@ def evaluate(a_ifile, a_verbose = False):
         assert pred in CLASSES, "Unrecognized predicted label: {:d}".format(pred)
         # output error
         if a_verbose and gold != pred:
-            print("{:d} confused with {:d} in message '{:s}'".format(gold, pred, ifields[TXT_IDX]))
+            print("{:d} confused with {:d} in message '{:s}'".format(\
+                gold, pred, ifields[TXT_IDX]).encode(ENCODING))
         # update statistics
         cstat[gold][TOTAL_IDX] += 1
         cstat[gold][DIFF_IDX] += abs(gold - pred)
