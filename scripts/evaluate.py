@@ -41,6 +41,8 @@ TAB_RE = re.compile(r"\t+")
 TOTAL_IDX = 0
 DIFF_IDX = 1
 
+TXT_IDX = -2
+
 ##################################################################
 # Methods
 def evaluate(a_ifile, a_verbose = False):
@@ -70,6 +72,9 @@ def evaluate(a_ifile, a_verbose = False):
         gold, pred = int(ifields[2]), int(ifields[-1])
         assert gold in CLASSES, "Unrecognized gold label: {:d}".format(gold)
         assert pred in CLASSES, "Unrecognized predicted label: {:d}".format(pred)
+        # output error
+        if a_verbose and gold != pred:
+            print("{:d} confused with {:d} in message '{:s}'".format(gold, pred, ifields[TXT_IDX]))
         # update statistics
         cstat[gold][TOTAL_IDX] += 1
         cstat[gold][DIFF_IDX] += abs(gold - pred)
