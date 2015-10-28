@@ -104,8 +104,8 @@ in TSV format""", type = argparse.FileType('r'), nargs = '*', default = [sys.std
     macro_MAE = micro_MAE = 0.
     for ifile in args.files:
         macro_MAE, micro_MAE = evaluate(ifile, args.verbose)
-        print("{:20s}{:.5%}".format("Macro-averaged MAE:", macro_MAE), file = sys.stderr)
-        print("{:20s}{:.5%}".format("Micro-averaged MAE:", micro_MAE), file = sys.stderr)
+        print("{:20s}{:.7}".format("Macro-averaged MAE:", macro_MAE), file = sys.stderr)
+        print("{:20s}{:.7}".format("Micro-averaged MAE:", micro_MAE), file = sys.stderr)
 
 ##################################################################
 # Main
