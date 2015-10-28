@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# -*- mode: python; coding: utf-8; -*-
 
 """Evaluation script for estimating mean absolute error (MAE).
 
@@ -41,16 +42,29 @@ TAB_RE = re.compile(r"\t+")
 TOTAL_IDX = 0
 DIFF_IDX = 1
 
-TXT_IDX = -2
+TXT_IDX = 3
 
 ##################################################################
 # Methods
-def evaluate(a_ifile, a_verbose = False):
+def get_fields(a_line):
+    """Custom function for obtaining fields from line
+
+    @param a_line - line to process
+
+    @return list of fields
+    """
+    a_line = COMMENT_RE.sub("", a_line).strip()
+    if not a_line:
+        return None
+    return TAB_RE.split(a_line)
+
+def evaluate(a_ifile, a_verbose = False, a_get_fields = get_fields):
     """Estimating mean absolute error on single input file
 
     @param a_ifile - iterable over lines
     @param a_verbose - boolean flag indiciating whether errors should
                      be printed as well
+    @param a_get_fields - custom function for obtaining fields from line
 
     @return 2-tuple with macro- and micro-averaged MAE
 
@@ -61,11 +75,10 @@ def evaluate(a_ifile, a_verbose = False):
     gold = pred = -1
     cstat = defaultdict(lambda: [0, 0])
     for iline in a_ifile:
-        iline = COMMENT_RE.sub("", iline).strip()
-        if not iline:
+        ifields = a_get_fields(iline)
+        if not ifields:
             continue
-        ifields = TAB_RE.split(iline)
-        if len(ifields) < MIN_FIELDS:
+        elif len(ifields) < MIN_FIELDS:
             print("WARNING: Unrecognized line format: '{:s}'".format(iline), file = sys.stderr)
             continue
         # obtain labels
