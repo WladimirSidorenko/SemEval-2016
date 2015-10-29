@@ -18,6 +18,10 @@ OPTIONS:
 -h|--help  print this screen and exit
 -v|--verbose  output errors
 
+@author = Wladimir Sidorenko (Uladzimir Sidarenka)
+@mail = <sidarenk at uni dash potsdam dot de>
+@version = 0.0.1
+
 """
 
 ##################################################################
@@ -42,6 +46,7 @@ TAB_RE = re.compile(r"\t+")
 TOTAL_IDX = 0
 DIFF_IDX = 1
 
+GLD_IDX = 2
 TXT_IDX = 3
 
 ##################################################################
@@ -82,7 +87,7 @@ def evaluate(a_ifile, a_verbose = False, a_get_fields = get_fields):
             print("WARNING: Unrecognized line format: '{:s}'".format(iline), file = sys.stderr)
             continue
         # obtain labels
-        gold, pred = int(ifields[2]), int(ifields[-1])
+        gold, pred = int(ifields[GLD_IDX]), int(ifields[-1])
         assert gold in CLASSES, "Unrecognized gold label: {:d}".format(gold)
         assert pred in CLASSES, "Unrecognized predicted label: {:d}".format(pred)
         # output error
