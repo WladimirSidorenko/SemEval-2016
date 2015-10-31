@@ -46,12 +46,9 @@ def _iterlines(a_file):
     @return iterator over resulting TSV fields
 
     """
-    ifields = None
     for iline in a_file:
-        ifields = get_fields(iline)
         # compute prediction and append it to the list of fields
-        ifields.append(a_classifier.predict(ifields[TXT_IDX]))
-        yield ifields
+        yield get_fields(iline)
 
 def main():
     """Classify tweets according to their sentiment polarity
@@ -65,17 +62,17 @@ tweets according to their sentiment polarity""")
     subparsers = argparser.add_subparsers(help="type of operation to perform", dest = "mode")
     # training options
     tr_parser = subparsers.add_parser(TRAIN, help = "train the model")
+    # common options
+    tr_parser.add_argument("-m", "--model", help = "path to the (stored or to be stored) model", \
+                              type = str)
+    tr_parser.add_argument("files", help = "input files in TSV format", \
+                           type = argparse.FileType('r'), nargs = '*', default = [sys.stdin])
     # testing options
-    tr_parser = subparsers.add_parser(TEST, help = "test the model")
+    test_parser = subparsers.add_parser(TEST, help = "test the model")
     # evaluation options (train and test at the same time)
     ev_parser = subparsers.add_parser(EVALUATE, help = "evaluate trained model")
     ev_parser.add_argument("-v", "--verbose", help = "output errors along with evaluation",
                            action = "store_true")
-    # common options
-    argparser.add_argument("-m", "--model", help = "path to the (stored or to be stored) model", \
-                               type = str)
-    argparser.add_argument("files", help = "input files in TSV format", \
-                           type = argparse.FileType('r'), nargs = '*', default = [sys.stdin])
     args = argparser.parse_args()
     # perform the requied action
     if args.mode == EVALUATE:
@@ -88,7 +85,7 @@ tweets according to their sentiment polarity""")
         #     print("{:20s}{:.7}".format("Micro-averaged MAE:", micro_MAE), file = sys.stderr)
     elif args.mode == TRAIN:
         classifier = SentimentClassifier(a_path = None)
-        classifier.train([(ifields[TXT_IDX], ifields[GLD_IDX]) for ifile in args.files \
+        classifier.train([(ifields[TXT_IDX].split(), ifields[GLD_IDX]) for ifile in args.files \
                               for ifields in _iterlines(ifile)], a_path = args.model)
     return 0
 

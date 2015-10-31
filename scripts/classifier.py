@@ -17,6 +17,8 @@ SentimentClassifier - classifier class for predicting sentiments
 
 ##################################################################
 # Imports
+from __future__ import unicode_literals, print_function
+
 from rnnmodel import RNNModel
 from sklearn.externals import joblib
 
@@ -65,6 +67,7 @@ class SentimentClassifier(object):
         if not a_path:
             a_path = DFLT_MODEL_PATH
 
+        a_path = os.path.abspath(a_path)
         if not os.access(os.path.dirname(a_path), os.W_OK):
             raise RuntimeError("Can't create model at specified path: '{:s}'".format(a_path))
 
