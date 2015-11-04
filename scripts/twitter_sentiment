@@ -1,18 +1,14 @@
 #!/usr/bin/env python
 # -*- mode: python; coding: utf-8; -*-
 
-"""Module for predicting polarity classes of tweets.
+"""Script for predicting polarity classes of tweets.
 
 The input file is assumed to be in TSV format where the second field
 (starting with 0) is assumed to be the gold label and the last field
 contains the text of the messages.
 
 USAGE:
-classify.py [OPTIONS] [input_file]
-
-OPTIONS:
--h|--help  print this screen and exit
--v|--verbose  output errors along with evaluation
+twitter_sentiment [MODE] [OPTIONS] [input_file]
 
 @author = Wladimir Sidorenko (Uladzimir Sidarenka)
 @mail = <sidarenk at uni dash potsdam dot de>
@@ -24,8 +20,9 @@ OPTIONS:
 # Imports
 from __future__ import print_function, unicode_literals
 
-from classifier import SentimentClassifier
+from sentiment_classifier import SentimentClassifier
 from evaluate import evaluate, get_fields, GLD_IDX, TXT_IDX
+from twokenize import tokenize
 
 import argparse
 import sys
@@ -38,6 +35,19 @@ EVALUATE = "evaluate"
 
 ##################################################################
 # Methods
+def _add_cmn_options(a_parser):
+    """Add common options to option subparser
+
+    @param a_parser - option subparser
+
+    @return \c void
+
+    """
+    a_parser.add_argument("-m", "--model", help = "path to the (stored or to be stored) model", \
+                              type = str)
+    a_parser.add_argument("files", help = "input files in TSV format", \
+                              type = argparse.FileType('r'), nargs = '*', default = [sys.stdin])
+
 def _iterlines(a_file):
     """Iterate over input lines of a file
 
@@ -62,15 +72,13 @@ tweets according to their sentiment polarity""")
     subparsers = argparser.add_subparsers(help="type of operation to perform", dest = "mode")
     # training options
     tr_parser = subparsers.add_parser(TRAIN, help = "train the model")
-    # common options
-    tr_parser.add_argument("-m", "--model", help = "path to the (stored or to be stored) model", \
-                              type = str)
-    tr_parser.add_argument("files", help = "input files in TSV format", \
-                           type = argparse.FileType('r'), nargs = '*', default = [sys.stdin])
+    _add_cmn_options(tr_parser)
     # testing options
     test_parser = subparsers.add_parser(TEST, help = "test the model")
+    _add_cmn_options(test_parser)
     # evaluation options (train and test at the same time)
     ev_parser = subparsers.add_parser(EVALUATE, help = "evaluate trained model")
+    _add_cmn_options(ev_parser)
     ev_parser.add_argument("-v", "--verbose", help = "output errors along with evaluation",
                            action = "store_true")
     args = argparser.parse_args()
@@ -85,7 +93,7 @@ tweets according to their sentiment polarity""")
         #     print("{:20s}{:.7}".format("Micro-averaged MAE:", micro_MAE), file = sys.stderr)
     elif args.mode == TRAIN:
         classifier = SentimentClassifier(a_path = None)
-        classifier.train([(ifields[TXT_IDX].split(), ifields[GLD_IDX]) for ifile in args.files \
+        classifier.train([(tokenize(ifields[TXT_IDX]), ifields[GLD_IDX]) for ifile in args.files \
                               for ifields in _iterlines(ifile)], a_path = args.model)
     return 0
 

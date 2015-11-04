@@ -20,6 +20,7 @@ from __future__ import print_function, unicode_literals
 
 import numpy as np
 import sys
+import theano.Tensor as T
 
 ##################################################################
 # Variables and Constants
@@ -88,9 +89,15 @@ class RNNModel(object):
             # digitize label
             if ilabel is not None:
                 if ilabel not in self.lbl2int:
-                    self.lbl2int[ilabel] = self.nlabels
+                    try:
+                        assert int(ilabel) not in self.int2lbl, \
+                            "Integral label {:s} already exists in the label map".format(ilabel)
+                        self.lbl2int[ilabel] = int(ilabel)
+                    except (AssertionError, ValueError):
+                        self.lbl2int[ilabel] = self.nlabels
                     self.nlabels += 1
                 dlabel = self.lbl2int[ilabel]
+                self.int2lbl[dlabel] = ilabel
             for iitem in iseq:
                 if iitem not in self.feat2vec:
                     self.feat2vec[iitem] = np.random.normal(MU, SIGMA, VEC_DIM)

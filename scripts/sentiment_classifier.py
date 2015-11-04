@@ -68,7 +68,8 @@ class SentimentClassifier(object):
             a_path = DFLT_MODEL_PATH
 
         a_path = os.path.abspath(a_path)
-        if not os.access(os.path.dirname(a_path), os.W_OK):
+        if (os.path.exists(a_path) and not os.access(a_path, os.W_OK)) or \
+                (not os.path.exists(a_path) and not os.access(os.path.dirname(a_path), os.W_OK)):
             raise RuntimeError("Can't create model at specified path: '{:s}'".format(a_path))
 
         imodel = RNNModel()
