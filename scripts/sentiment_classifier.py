@@ -74,4 +74,5 @@ class SentimentClassifier(object):
 
         imodel = RNNModel()
         imodel.fit(a_train_set)
-        joblib.dump(imodel, a_path)
+        # do not perform any dumping so far
+        # joblib.dump(imodel, a_path)
