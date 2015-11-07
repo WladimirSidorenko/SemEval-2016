@@ -20,8 +20,11 @@ from __future__ import print_function, unicode_literals
 
 import numpy as np
 import sys
-import theano.tensor as TT
 import theano
+
+from theano import tensor as TT
+from collections import OrderedDict
+from itertools import chain
 
 ##################################################################
 # Variables and Constants
@@ -35,14 +38,19 @@ MU = 0.
 SIGMA = 1.5
 
 # dimension of input vectors
-VEC_DIM = (1, 20)
+VEC_DIM = 20
+# context window
+CW = 2
 
 # custom function for generating random vectors
 np.random.seed()
 RND_VEC = lambda a_dim = VEC_DIM: np.random.uniform(UMIN, UMAX, a_dim)
 
-# symbolic code for missing vectors
+# symbolic codes for auxiliary vectors
 UNK = "___%UNK%___"
+BEG = "___%BEG%___"
+END = "___%END%___"
+AUX_VEC_KEYS = [UNK, BEG, END]
 
 ##################################################################
 # Class
@@ -50,11 +58,14 @@ class RNNModel(object):
     """Wrapper class around an RNN classifier.
 
     Instance variables:
+    vdim - default dimensionality of embedding vectors
+    V - size of fature vocabulary
+    nlabels - total number of distinct target labels
     lbl2int - mapping from string classes to integers
     int2lbl - reverse mapping from integers to string classes
-    int2coeff - mapping from label integer to its coefficient
-    feat2vec - mapping from string features to their learned
-                representations
+    int2coeff - mapping from label integer to its integral coefficient
+    feat2idx - mapping from string features to the ondex of their
+                learned representations
 
     Methods:
     train - extract features and adjust parameters of the model
@@ -62,20 +73,39 @@ class RNNModel(object):
 
     """
 
-    def __init__(self):
+    def __init__(self, a_vdim = VEC_DIM):
         """Class constructor.
 
+        @param a_vdim - default dimensionality of embedding vectors
+
         """
+        self.V = 0              # vocabulary size
         self.nlabels = 0
+        self.vdim = a_vdim
+        # mapping from symbolic representations to indices
         self.lbl2int = dict()
         self.int2lbl = dict()
         self.int2coeff = dict()
-        self.feat2vec = dict()
-        # declare Theano symbolic variables
-        # word compositionality tensor (2d x 2d x d)
-        self.W = theano.shared(np.random.randn(2*VEC_DIM[-1], 2*VEC_DIM[-1], VEC_DIM[-1]))
-        # bias tensor (2d x d)
-        self.V = theano.shared(np.random.randn(2*VEC_DIM[-1], VEC_DIM[-1]))
+        self.feat2idx = dict()
+        self.alpha = TT.scalar("alpha")
+        # declare symbolic Theano variables
+        self.EMB = None
+        # word compositionality tensor (2d x 2d x d) (from embeddings to hidden)
+        self.E2H = theano.shared(RND_VEC((CW * self.vdim, CW * self.vdim, self.vdim)))
+        # recurrence matrix for the hidden layer (d x d)
+        self.H2H = theano.shared(RND_VEC((self.vdim, self.vdim)))
+        # bias vector for the hidden layer (1 x d)
+        self.HBV = theano.shared(RND_VEC((1, self.vdim)))
+        # recurrent layer
+        self.H0  = theano.shared(np.zeros(self.vdim, dtype=theano.config.floatX))
+        # predictor matrix (hidden --> out) (nlabels x d) (it's empty
+        # until we get to know the number of labels)
+        self.H2Y = None
+        # bias vector for the output layer (1 x nlabels)
+        self.YBV = None
+        self.recurrence = None
+        # auxiliary variable for keeping track of parameters
+        self._params = [self.E2H, self.H2H, self.HBV]
 
     def fit(self, a_trainset):
         """Train RNN model on the training set.
@@ -86,51 +116,113 @@ class RNNModel(object):
         @return \c void
 
         """
-        print("original trainset =", repr(a_trainset[0]), file = sys.stderr)
-        a_trainset = self._digitize_feats(a_trainset)
-        print("digitized trainset =", repr(a_trainset[0]), file = sys.stderr)
+        # estimate the number of distinct features
+        self.V = len(set([f for t in a_trainset for f in t[0]])) + len(AUX_VEC_KEYS)
+        # initialize embedding matrix for features
+        self.EMB = theano.shared(RND_VEC((self.V, self.vdim)))
+        cnt = 0
+        for ikey in AUX_VEC_KEYS:
+            self.feat2idx[ikey] = cnt
+            cnt += 1
+        # prepend embeddings matrix to the list of parameters to be trained
+        self._params[0:0] = [self.EMB]
+        self.nlabels = len(set([t[1] for t in a_trainset]))
+        # initialize prediction matrix
+        self.H2Y = theano.shared(RND_VEC((self.vdim, self.nlabels)))
+        self.YBV = theano.shared(RND_VEC((1, self.nlabels)))
+        self._params.append(self.H2Y); self._params.append(self.YBV)
+
+        # define custom recurrence function
+        def _recurrence(x_t, h_tm1):
+            h_t = TT.nnet.sigmoid(TT.dot(self.EMB[x_t], \
+                                             TT.tensordot(self.E2H, \
+                                                              self.EMB[x_t].T, 1).reshape(\
+                    [self.vdim * CW, self.vdim * CW]).T) + TT.dot(h_tm1, self.H2H) + self.HBV)
+            s_t = TT.nnet.softmax(TT.dot(h_t, self.H2Y) + self.YBV)
+            return [h_t, s_t]
+
+        # auxiliary variables used for training
+        x = TT.imatrix('x')
+        y = TT.vector('y')
+        [h, s], _ = theano.scan(fn = _recurrence, sequences = x, \
+                                    outputs_info = [self.H0, None], \
+                                    n_steps = x.shape[0])
+
+        p_y_given_x_lastword = s[-1,0,:]
+        p_y_given_x_sentence = s[:,0,:]
+        y_pred = T.argmax(p_y_given_x_sentence, axis=1)
+
+        nll = -TT.log(p_y_given_x_lastword)[y]
+        gradients = TT.grad(nll, self._params)
+        updates = OrderedDict((p, p - self.alpha * g) for p, g in \
+                                  zip(self._params , gradients))
         # compile training function
-        # train = theano.function(inputs=[x,y], outputs=[prediction, xent], \
-        #                         updates=[(w, w-0.01*gw), (b, b-0.01*gb)], name = "train")
-        pass
+        train = theano.function(inputs = [x, y], outputs = nll, \
+                                updates = updates)
+        # convert symbolic features to embedding indices
+        a_trainset = self._digitize_feats(a_trainset)
+        # perform training
+        for x, y in a_trainset:
+            print("x =", repr(x), file = sys.stderr)
+            train(x, y)
 
     def _digitize_feats(self, a_trainset):
         """Convert features and target classes to vectors and ints.
 
-        @param a_trainset - trainig set as a list of 2-tuples with
+        @param a_trainset - training set as a list of 2-tuples with
                             training instances and classes
-        @param a_feat_size - dimension of feature representation
 
         @return new list of digitized features and classes
 
         """
+        assert self.nlabels > 0, "Invalid number of labels."
+        assert self.V > 0, "Invalid size of feature vocabulary."
         ret = []
-        ditems = None; coeff = 1.
+        clabels = 0; cfeats = len(AUX_VEC_KEYS)
+        ditems = None; dlabel = None; dint = coeff = 1.
         # create a vector for unknown words
-        self.feat2vec[UNK] = RND_VEC()
         for iseq, ilabel in a_trainset:
-            ditems = []
-            # digitize label
+            # digitize label and convert it to a vector
             if ilabel is not None:
                 if ilabel not in self.lbl2int:
                     try:
                         coeff = int(ilabel)
                     except (AssertionError, ValueError):
-                        pass
-                    self.lbl2int[ilabel] = self.nlabels
-                    self.int2lbl[self.nlabels] = ilabel
-                    self.int2coeff[self.nlabels] = abs(coeff) + 1e-5
-                    self.nlabels += 1
-                dlabel = self.lbl2int[ilabel]
-            # convert features to vectors
-            for iitem in iseq:
-                if iitem not in self.feat2vec:
-                    self.feat2vec[iitem] = RND_VEC()
-                ditems.append(self.feat2vec[iitem])
+                        coeff = 1.
+                    self.lbl2int[ilabel] = clabels
+                    self.int2lbl[clabels] = ilabel
+                    self.int2coeff[clabels] = abs(coeff) + 1
+                    clabels += 1
+                dint = self.lbl2int[ilabel]
+                dlabel = np.zeros(self.nlabels)
+                dlabel[dint] = 1 * self.int2coeff[dint]
+            # convert features to vector indices
+            ditems = np.empty((len(iseq), 2), dtype = int)
+            prev_idx = self.feat2idx[BEG]; idx = -1
+            for i, iitem in enumerate(chain(iseq, [END])):
+                if iitem not in self.feat2idx:
+                    self.feat2idx[iitem] = cfeats
+                    cfeats += 1
+                idx = self.feat2idx[iitem]
+                ditems[i,:] = [prev_idx, idx]
             ret.append((ditems, dlabel))
-        # convert labels to vectors
-        lvec = None
-        for i, (feats, lbl) in enumerate(ret):
-            lvec = np.zeros(self.nlabels); lvec[lbl] = 1.
-            ret[i] = (feats, lvec)
         return ret
+
+    def _reset(self):
+        """Reset instance variables.
+
+        @return \c void
+
+        """
+        pass
+
+
+    def _predict(self, a_x):
+        """Predict labels for given input.
+
+        @param a_x - training feature set
+
+        @return Theano vector of predictions
+
+        """
+        pass
