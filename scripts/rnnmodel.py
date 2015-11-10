@@ -91,7 +91,7 @@ class RNNModel(object):
         # declare symbolic Theano variables
         self.EMB = None
         # word compositionality tensor (2d x 2d x d) (from embeddings to hidden)
-        self.E2H = theano.shared(RND_VEC((CW * self.vdim, CW * self.vdim, self.vdim)))
+        self.E2H = theano.shared(RND_VEC((self.vdim, CW * self.vdim, CW * self.vdim)))
         # recurrence matrix for the hidden layer (d x d)
         self.H2H = theano.shared(RND_VEC((self.vdim, self.vdim)))
         # bias vector for the hidden layer (1 x d)
@@ -134,10 +134,10 @@ class RNNModel(object):
 
         # define custom recurrence function
         def _recurrence(x_t, h_tm1):
-            h_t = TT.nnet.sigmoid(TT.dot(self.EMB[x_t], \
-                                             TT.tensordot(self.E2H, \
-                                                              self.EMB[x_t].T, 1).reshape(\
-                    [self.vdim * CW, self.vdim * CW]).T) + TT.dot(h_tm1, self.H2H) + self.HBV)
+            in_t = TT.dot(TT.tensordot(self.EMB[x_t], self.E2H, [[1], [1]]), \
+                                             self.EMB[x_t])
+            in_t.reshape([1, self.vdim], ndim = 2)
+            h_t = TT.nnet.sigmoid(in_t + TT.dot(h_tm1, self.H2H) + self.HBV)
             s_t = TT.nnet.softmax(TT.dot(h_t, self.H2Y) + self.YBV)
             return [h_t, s_t]
 
