@@ -20,7 +20,8 @@ SentimentClassifier - classifier class for predicting sentiments
 from __future__ import unicode_literals, print_function
 
 from rnnmodel import RNNModel
-from sklearn.externals import joblib
+from sklearn.externals.joblib import dump, load
+# from cPickle import dump, load
 
 import os
 import sys
@@ -75,4 +76,4 @@ class SentimentClassifier(object):
         imodel = RNNModel()
         imodel.fit(a_train_set)
         # do not perform any dumping so far
-        # joblib.dump(imodel, a_path)
+        dump(imodel, a_path)
