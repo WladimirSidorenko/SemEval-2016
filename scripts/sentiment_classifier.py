@@ -51,10 +51,12 @@ class SentimentClassifier(object):
         """
         if a_path is None:
             self.model = None
+            self.predict = self._invalid_predict
         else:
             if not os.path.isfile(a_path) or not os.access(a_path, os.R_OK):
                 raise RuntimeError("Can't create model from file {:s}".format(a_path))
-            self.model = joblib.load(a_path)
+            self.model = load(a_path)
+            self.predict = self._predict
 
     def train(self, a_train_set, a_path = DFLT_MODEL_PATH):
         """Train model and store it at specified path.
@@ -72,8 +74,34 @@ class SentimentClassifier(object):
         if (os.path.exists(a_path) and not os.access(a_path, os.W_OK)) or \
                 (not os.path.exists(a_path) and not os.access(os.path.dirname(a_path), os.W_OK)):
             raise RuntimeError("Can't create model at specified path: '{:s}'".format(a_path))
-
+        # create and train an RNN model
         imodel = RNNModel()
         imodel.fit(a_train_set)
-        # do not perform any dumping so far
+        # remember model as instance attribute
+        self.model = imodel
+        self.predict = self._predict
+        # dump trained model to disc
+        sys.setrecursionlimit(1500) # model might be large to save
         dump(imodel, a_path)
+
+    def _predict(self, a_inst):
+        """Predict label of a new instance.
+
+        @param a_inst - instance whose label should be predicted
+
+        @return predicted symbolic label
+
+        """
+        return self.model.predict(a_inst)
+
+
+    def _invalid_predict(self, a_seq):
+        """Invalid prediction function
+
+        @param a_seq - input sequence whose class should be predicted
+
+        @raise RuntimeError
+
+        """
+        raise RuntimeError("Model is not trained.")
+

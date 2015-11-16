@@ -28,9 +28,12 @@ from itertools import chain
 
 ##################################################################
 # Variables and Constants
+INF = float("inf")
 
-# default learning rate
+# default training parameters
 ALPHA = 1e-3
+EPSILON = 1e-5
+MAX_ITERS = 1e2
 
 # initial parameters for uniform distribution
 UMIN = -1.5
@@ -41,7 +44,7 @@ MU = 0.
 SIGMA = 1.5
 
 # dimension of input vectors
-VEC_DIM = 20
+VEC_DIM = 2 # 20
 # context window
 CW = 2
 
@@ -54,6 +57,25 @@ UNK = "___%UNK%___"
 BEG = "___%BEG%___"
 END = "___%END%___"
 AUX_VEC_KEYS = [UNK, BEG, END]
+
+##################################################################
+# Methods
+def _iwindow(seq, n=2):
+    """Iterate over data with a sliding window (of width n)
+
+    @param seq - sequence to iterate over
+    @param n - width of the window
+
+    @return window-sized iterator over sequence
+
+    """
+    it = iter(seq)
+    result = tuple(islice(it, n))
+    if len(result) == n:
+        yield result
+    for elem in it:
+        result = result[1:] + (elem,)
+        yield result
 
 ##################################################################
 # Class
@@ -107,6 +129,8 @@ class RNNModel(object):
         # bias vector for the output layer (1 x nlabels)
         self.YBV = None
         self.recurrence = None
+        # private prediction function (will be initialized after training)
+        self._predict = None
         # auxiliary variable for keeping track of parameters
         self._params = [self.E2H, self.H2H, self.HBV]
 
@@ -167,10 +191,30 @@ class RNNModel(object):
         # convert symbolic features to embedding indices
         a_trainset = self._digitize_feats(a_trainset)
         # perform training
-        for x, y in a_trainset:
-            # print("x =", repr(x), file = sys.stderr)
-            # print("y =", repr(y), file = sys.stderr)
-            train(x, y)
+        prev_s = s = INF
+        for _ in xrange(MAX_ITERS):
+            s = 0.
+            for x_i, y_i in a_trainset:
+                # print("x =", repr(x), file = sys.stderr)
+                # print("y =", repr(y), file = sys.stderr)
+                s += train(x_i, y_i)
+            if prev_s != s and (prev_s - s) < EPSILON:
+                break
+            prev_s = s
+            print("s =", repr(s), file = sys.stderr)
+        # set prediction function
+        self._predict = theano.function(inputs = [x], outputs = y_pred)
+
+    def predict(self, a_seq):
+        """Prediction function
+
+        @param a_seq - input sequence whose class should be predicted
+
+        @return predicted label
+
+        """
+        y = int(self._predict(self._feat2idcs(a_seq)))
+        return self.int2lbl[y]
 
     def _digitize_feats(self, a_trainset):
         """Convert features and target classes to vectors and ints.
@@ -184,8 +228,8 @@ class RNNModel(object):
         assert self.nlabels > 0, "Invalid number of labels."
         assert self.V > 0, "Invalid size of feature vocabulary."
         ret = []
-        clabels = 0; cfeats = len(AUX_VEC_KEYS)
-        ditems = None; dlabel = None; dint = coeff = 1.
+        clabels = 0
+        dlabel = None; dint = coeff = 1.
         # create a vector for unknown words
         for iseq, ilabel in a_trainset:
             # digitize label and convert it to a vector
@@ -203,18 +247,48 @@ class RNNModel(object):
                 # dlabel = dint
                 dlabel = np.zeros(self.nlabels)
                 dlabel[dint] = 1 * self.int2coeff[dint]
-            # convert features to vector indices
-            ditems = np.empty((len(iseq) + 1, 2), dtype = int)
-            prev_idx = self.feat2idx[BEG]; idx = -1
-            for i, iitem in enumerate(chain(iseq, [END])):
-                if iitem not in self.feat2idx:
-                    self.feat2idx[iitem] = cfeats
-                    cfeats += 1
-                idx = self.feat2idx[iitem]
-                ditems[i,:] = [prev_idx, idx]
-                prev_idx = idx
-            ret.append((ditems, dlabel))
+            # convert features to indices and append new training
+            # instance
+            ret.append((self._feat2idcs(iseq, a_add = True), dlabel))
         return ret
+
+    def _feat2idcs(self, a_seq, a_add = False):
+        """Convert features to their indices.
+
+        @param a_seq - sequence of features to be converted
+        @param a_add - boolean flag indicating whether features should
+                       be added to an internal dictionary
+
+        @return list of lists of feature indices within a given context
+
+        """
+        # append auxiliary inout items
+        a_seq[:0] = [BEG]; a_seq.append(END)
+        # initialize matrix of feature indices
+        ditems = np.empty((len(a_seq) + 1 - CW, CW), dtype = int)
+        # convert features to vector indices for the first
+        feat_idcs = []
+        cfeats = len(self.feat2idx)
+        for iitem in a_seq[:CW]:
+            if a_add and iitem not in self.feat2idx:
+                self.feat2idx[iitem] = cfeats
+                cfeats += 1
+            feat_idcs.append(self.feat2idx.get(iitem, UNK))
+        while len(feat_idcs) < CW:
+            feat_idcs.append(self.feat2idx[UNK])
+        ditems[0,:] = feat_idcs
+        i = 1
+        for iitem in a_seq[CW:]:
+            if a_add and iitem not in self.feat2idx:
+                self.feat2idx[iitem] = cfeats
+                cfeats += 1
+            # unshift first element
+            feat_idcs[:1] = []
+            # append new element
+            feat_idcs.append(self.feat2idx.get(iitem, UNK))
+            ditems[i,:] = feat_idcs
+            i += 1
+        return ditems
 
     def _reset(self):
         """Reset instance variables.
@@ -222,15 +296,4 @@ class RNNModel(object):
         @return \c void
 
         """
-        pass
-
-
-    def _predict(self, a_x):
-        """Predict labels for given input.
-
-        @param a_x - training feature set
-
-        @return Theano vector of predictions
-
-        """
-        pass
+        self._predict = None
