@@ -77,6 +77,8 @@ tweets according to their sentiment polarity""")
     _add_cmn_options(tr_parser)
     # testing options
     test_parser = subparsers.add_parser(TEST, help = "test the model")
+    test_parser.add_argument("-v", "--verbose", help = "output scores along with predicted labels",
+                             action = "store_true")
     _add_cmn_options(test_parser)
     # evaluation options (train and test at the same time)
     ev_parser = subparsers.add_parser(EVALUATE, help = "evaluate trained model")
@@ -87,17 +89,22 @@ tweets according to their sentiment polarity""")
     # perform the requied action
     if args.mode == TRAIN:
         classifier = SentimentClassifier(a_path = None)
-        classifier.train([(tokenize(ifields[TXT_IDX]), ifields[GLD_IDX]) for ifile in args.files \
-                              for ifields in _iterlines(ifile)], a_path = args.model)
+        classifier.train([([list(w) for w in tokenize(ifields[TXT_IDX])], ifields[GLD_IDX]) \
+                          for ifile in args.files \
+                          for ifields in _iterlines(ifile)], a_path = args.model)
     elif args.mode == TEST:
         # load model from default location
-        y = ""
+        y = ""; score = 0.
         classifier = SentimentClassifier()
         for ifile in args.files:
             for ifields in _iterlines(ifile):
-                y = classifier.predict(tokenize(ifields[TXT_IDX]))
+                y, score = classifier.predict([list(w) for w in tokenize(ifields[TXT_IDX])])
+                if args.verbose:
+                    ifields.append(str(score))
                 ifields.append(y)
                 print(TAB.join(ifields))
+    else:
+        raise NotImplementedError
         # for ifile in a_files:
         #     macro_MAE, micro_MAE = evaluate(classify(classifier, ifile), args.verbose, lambda x: x)
         #     print("{:20s}{:.7}".format("Macro-averaged MAE:", macro_MAE), file = sys.stderr)

@@ -20,8 +20,7 @@ SentimentClassifier - classifier class for predicting sentiments
 from __future__ import unicode_literals, print_function
 
 from rnnmodel import RNNModel
-from sklearn.externals.joblib import dump, load
-# from cPickle import dump, load
+from cPickle import dump, load
 
 import os
 import sys
@@ -55,7 +54,8 @@ class SentimentClassifier(object):
         else:
             if not os.path.isfile(a_path) or not os.access(a_path, os.R_OK):
                 raise RuntimeError("Can't create model from file {:s}".format(a_path))
-            self.model = load(a_path)
+            with open(a_path, "rb") as ifile:
+                self.model = load(ifile)
             self.predict = self._predict
 
     def train(self, a_train_set, a_path = DFLT_MODEL_PATH):
@@ -81,24 +81,24 @@ class SentimentClassifier(object):
         self.model = imodel
         self.predict = self._predict
         # dump trained model to disc
-        sys.setrecursionlimit(1500) # model might be large to save
-        dump(imodel, a_path)
+        # sys.setrecursionlimit(1500) # model might be large to save
+        with open(a_path, "wb") as ofile:
+            dump(self.model, ofile)
 
     def _predict(self, a_inst):
         """Predict label of a new instance.
 
         @param a_inst - instance whose label should be predicted
 
-        @return predicted symbolic label
+        @return 2-tuple with predicted symbolic label and its score
 
         """
         return self.model.predict(a_inst)
 
-
-    def _invalid_predict(self, a_seq):
+    def _invalid_predict(self, a_inst):
         """Invalid prediction function
 
-        @param a_seq - input sequence whose class should be predicted
+        @param a_inst - input sequence whose class should be predicted
 
         @raise RuntimeError
 

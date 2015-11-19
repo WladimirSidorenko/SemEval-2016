@@ -22,7 +22,7 @@ import numpy as np
 import sys
 import theano
 
-from theano import tensor as TT
+from theano import printing, tensor as TT
 from collections import OrderedDict
 from itertools import chain
 
@@ -31,9 +31,14 @@ from itertools import chain
 INF = float("inf")
 
 # default training parameters
-ALPHA = 1e-3
+ALPHA = 5e-3
 EPSILON = 1e-5
-MAX_ITERS = 1e2
+MAX_ITERS = 50
+
+# default dimension of input vectors
+VEC_DIM = 32
+# default context window
+# CW = 1
 
 # initial parameters for uniform distribution
 UMIN = -1.5
@@ -42,11 +47,6 @@ UMAX = 1.5
 # initial parameters for normal distribution
 MU = 0.
 SIGMA = 1.5
-
-# dimension of input vectors
-VEC_DIM = 2 # 20
-# context window
-CW = 2
 
 # custom function for generating random vectors
 np.random.seed()
@@ -115,24 +115,20 @@ class RNNModel(object):
         self.alpha = ALPHA
         # declare symbolic Theano variables
         self.EMB = None
-        # word compositionality tensor (2d x 2d x d) (from embeddings to hidden)
-        self.E2H = theano.shared(value = RND_VEC((self.vdim, CW * self.vdim, CW * self.vdim)))
-        # recurrence matrix for the hidden layer (d x d)
-        self.H2H = theano.shared(value = RND_VEC((self.vdim, self.vdim)))
-        # bias vector for the hidden layer (1 x d)
-        self.HBV = theano.shared(value = RND_VEC((1, self.vdim)))
-        # recurrent layer
-        self.H0  = theano.shared(value = np.zeros([1, self.vdim], dtype=theano.config.floatX))
-        # predictor matrix (hidden --> out) (nlabels x d) (it's empty
+        # convolutional matrix (feature map) of width 2
+        self.CNV2 = theano.shared(value = RND_VEC((2, self.vdim)))
+        # convolutional matrix (feature map) of width 3
+        self.CNV3 = theano.shared(value = RND_VEC((3, self.vdim)))
+        # convolutional matrix (feature map) of width 4
+        self.CNV4 = theano.shared(value = RND_VEC((4, self.vdim)))
         # until we get to know the number of labels)
         self.H2Y = None
         # bias vector for the output layer (1 x nlabels)
         self.YBV = None
-        self.recurrence = None
         # private prediction function (will be initialized after training)
         self._predict = None
         # auxiliary variable for keeping track of parameters
-        self._params = [self.E2H, self.H2H, self.HBV]
+        self._params = []
 
     def fit(self, a_trainset):
         """Train RNN model on the training set.
@@ -144,9 +140,11 @@ class RNNModel(object):
 
         """
         # estimate the number of distinct features
-        self.V = len(set([f for t in a_trainset for f in t[0]])) + len(AUX_VEC_KEYS)
+        self.V = len(AUX_VEC_KEYS) + len(set([c for wlist, _ in a_trainset \
+                                              for w in wlist for c in w]))
         # initialize embedding matrix for features
         self.EMB = theano.shared(value = RND_VEC((self.V, self.vdim)))
+        self._params.append(self.EMB)
         cnt = 0
         for ikey in AUX_VEC_KEYS:
             self.feat2idx[ikey] = cnt
@@ -155,66 +153,72 @@ class RNNModel(object):
         self._params[0:0] = [self.EMB]
         self.nlabels = len(set([t[1] for t in a_trainset]))
         # initialize prediction matrix
-        self.H2Y = theano.shared(value = RND_VEC((self.vdim, self.nlabels)))
-        self.YBV = theano.shared(value = RND_VEC((1, self.nlabels)))
-        self._params.append(self.H2Y); self._params.append(self.YBV)
+        # self.H2Y = theano.shared(value = RND_VEC((self.vdim, self.nlabels)))
+        # self.YBV = theano.shared(value = RND_VEC((1, self.nlabels)))
+        # self._params.append(self.H2Y); self._params.append(self.YBV)
 
-        # define custom recurrence function
-        def _recurrence(x_t, h_tm1):
-            # embedding layer
-            emb_t = self.EMB[x_t].reshape([1, CW * self.vdim], ndim = 2)
-            # embedding layer propagated via tensor
-            in_t = TT.dot(TT.tensordot(emb_t, self.E2H, [[1], [1]]), emb_t.T)
-            in_t = in_t.reshape([1, self.vdim], ndim = 2)
-            # print("in_t.shape", repr(in_t.shape), file = sys.stderr)
-            # hidden layer gets embeddings and its own state from the last run
-            h_t = TT.nnet.sigmoid(in_t + TT.dot(h_tm1, self.H2H) + self.HBV)
-            # print("h_t.shape", repr(h_t.shape), file = sys.stderr)
-            s_t = TT.nnet.softmax(TT.dot(h_t, self.H2Y) + self.YBV)
-            return [h_t, s_t]
+        # # define custom recursive function
+        # def _recurrence(x_t):
+        #     # embedding layer
+        #     emb_t = self.EMB[x_t].reshape([1, CW * self.vdim], ndim = 2)
+        #     # embedding layer propagated via tensor
+        #     # in_t = TT.dot(TT.tensordot(emb_t, self.E2H, [[1], [1]]), emb_t.T)
+        #     # in_t = in_t.reshape([1, self.vdim], ndim = 2)
+        #     # print("in_t.shape", repr(in_t.shape), file = sys.stderr)
+        #     # 0-th hidden layer
+        #     h0_t = TT.nnet.relu(TT.dot(emb_t, self.E2H) + self.H0BV, 0.5)
+        #     h1_t = TT.nnet.sigmoid(TT.dot(h0_t, self.H02H1) + self.H1BV)
+        #     h2_t = TT.nnet.relu(TT.dot(h1_t, self.H12H2) + self.H2BV)
+        #     # print("h_t.shape", repr(h_t.shape), file = sys.stderr)
+        #     s_t = TT.nnet.softmax(TT.dot(h2_t, self.H2Y) + self.YBV)
+        #     return [s_t]
 
-        # auxiliary variables used for training
-        x = TT.lmatrix('x')
-        y = TT.vector('y')
-        [h, s], _ = theano.scan(fn = _recurrence, sequences = x, \
-                                outputs_info = [self.H0, None], \
-                                n_steps = x.shape[0])
+        # # auxiliary variables used for training
+        # X = TT.lmatrix('X')
+        # # y = TT.vector('y')
+        # y = TT.iscalar('y')
+        # s, _ = theano.scan(fn = _recurrence, sequences = X, \
+        #                    n_steps = X.shape[0])
 
-        p_y_given_x_lastword = s[-1,0,:]
-        y_pred = TT.argmax(p_y_given_x_lastword, axis = 0)
-        nll = TT.sqrt(TT.sum(TT.pow(y - TT.log(p_y_given_x_lastword), 2)))
-        gradients = TT.grad(nll, self._params)
-        updates = OrderedDict((p, p - self.alpha * g) for p, g in \
-                                  zip(self._params , gradients))
-        # compile training function
-        train = theano.function(inputs = [x, y], outputs = nll, updates = updates)
+        # p_y_given_x_lastword = s[-1,0,:]
+        # y_pred = TT.argmax(p_y_given_x_lastword, axis = 0)
+        # score = p_y_given_x_lastword[y_pred]
+        # nll = -TT.log(p_y_given_x_lastword)[y]
+        # # nll =  TT.sum(TT.pow(y - TT.log(p_y_given_x_lastword), 2))
+        # gradients = TT.grad(nll, self._params)
+        # updates = OrderedDict((p, p - self.alpha * g) for p, g in \
+        #                           zip(self._params , gradients))
+        # # compile training function
+        # train = theano.function(inputs = [x, y], outputs = nll, updates = updates)
         # convert symbolic features to embedding indices
         a_trainset = self._digitize_feats(a_trainset)
+        sys.exit(66)
         # perform training
         prev_s = s = INF
+        # set prediction function
+        self._predict = theano.function(inputs = [x], outputs = [y_pred, score])
         for _ in xrange(MAX_ITERS):
             s = 0.
             for x_i, y_i in a_trainset:
                 # print("x =", repr(x), file = sys.stderr)
                 # print("y =", repr(y), file = sys.stderr)
-                s += train(x_i, y_i)
+                # s += train(x_i, y_i)
+                pass
             if prev_s != s and (prev_s - s) < EPSILON:
                 break
             prev_s = s
             print("s =", repr(s), file = sys.stderr)
-        # set prediction function
-        self._predict = theano.function(inputs = [x], outputs = y_pred)
 
     def predict(self, a_seq):
         """Prediction function
 
         @param a_seq - input sequence whose class should be predicted
 
-        @return predicted label
+        @return 2-tuple with predicted label and its assigned score
 
         """
-        y = int(self._predict(self._feat2idcs(a_seq)))
-        return self.int2lbl[y]
+        y, score = self._predict(self._feat2idcs(a_seq))
+        return (self.int2lbl[int(y)], score)
 
     def _digitize_feats(self, a_trainset):
         """Convert features and target classes to vectors and ints.
@@ -229,7 +233,7 @@ class RNNModel(object):
         assert self.V > 0, "Invalid size of feature vocabulary."
         ret = []
         clabels = 0
-        dlabel = None; dint = coeff = 1.
+        dlabel = -1; dint = coeff = 1.
         # create a vector for unknown words
         for iseq, ilabel in a_trainset:
             # digitize label and convert it to a vector
@@ -244,12 +248,13 @@ class RNNModel(object):
                     self.int2coeff[clabels] = abs(coeff) + 1
                     clabels += 1
                 dint = self.lbl2int[ilabel]
-                # dlabel = dint
-                dlabel = np.zeros(self.nlabels)
-                dlabel[dint] = 1 * self.int2coeff[dint]
+                # dlabel = np.zeros(self.nlabels)
+                # dlabel[dint] = 1 * self.int2coeff[dint]
+                dlabel = dint
             # convert features to indices and append new training
             # instance
             ret.append((self._feat2idcs(iseq, a_add = True), dlabel))
+            sys.exit(66)
         return ret
 
     def _feat2idcs(self, a_seq, a_add = False):
@@ -262,32 +267,23 @@ class RNNModel(object):
         @return list of lists of feature indices within a given context
 
         """
-        # append auxiliary inout items
-        a_seq[:0] = [BEG]; a_seq.append(END)
+        # print("a_seq = ", repr(a_seq), file = sys.stderr)
         # initialize matrix of feature indices
-        ditems = np.empty((len(a_seq) + 1 - CW, CW), dtype = int)
-        # convert features to vector indices for the first
+        ditems = []
+        # convert features to vector indices
         feat_idcs = []
         cfeats = len(self.feat2idx)
-        for iitem in a_seq[:CW]:
-            if a_add and iitem not in self.feat2idx:
-                self.feat2idx[iitem] = cfeats
-                cfeats += 1
-            feat_idcs.append(self.feat2idx.get(iitem, UNK))
-        while len(feat_idcs) < CW:
-            feat_idcs.append(self.feat2idx[UNK])
-        ditems[0,:] = feat_idcs
-        i = 1
-        for iitem in a_seq[CW:]:
-            if a_add and iitem not in self.feat2idx:
-                self.feat2idx[iitem] = cfeats
-                cfeats += 1
-            # unshift first element
-            feat_idcs[:1] = []
-            # append new element
-            feat_idcs.append(self.feat2idx.get(iitem, UNK))
-            ditems[i,:] = feat_idcs
-            i += 1
+        for iword in a_seq:
+            # append auxiliary items
+            iword[:0] = [BEG]; iword.append(END)
+            for ichar in iword:
+                if a_add and ichar not in self.feat2idx:
+                    self.feat2idx[ichar] = cfeats
+                    cfeats += 1
+                feat_idcs.append(self.feat2idx.get(ichar, UNK))
+            ditems.append(self.EMB[feat_idcs])
+            del feat_idcs[:]
+        # print("ditems = ", repr([i.shape.eval() for i in ditems]), file = sys.stderr)
         return ditems
 
     def _reset(self):
