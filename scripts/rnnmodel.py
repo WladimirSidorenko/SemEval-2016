@@ -36,7 +36,7 @@ EPSILON = 1e-5
 MAX_ITERS = 50
 
 # default dimension of input vectors
-VEC_DIM = 32
+VEC_DIM = 4                     # 32
 # default context window
 # CW = 1
 
@@ -107,28 +107,36 @@ class RNNModel(object):
         self.V = 0              # vocabulary size
         self.nlabels = 0
         self.vdim = a_vdim
+        self.max_len = 0        # maximum length of an input item
+        # maximum width of a convolution stride
+        self.max_conv_len = theano.shared(value = 5, name = "MAX_CONV_LEN")
         # mapping from symbolic representations to indices
         self.lbl2int = dict()
         self.int2lbl = dict()
         self.int2coeff = dict()
         self.feat2idx = dict()
         self.alpha = ALPHA
-        # declare symbolic Theano variables
+        # auxiliary zero matrix used for padding the input
+        self._subzero = TT.zeros((self.max_conv_len, self.vdim))
+        # matrix of items' embeddings (either words or characters)
         self.EMB = None
-        # convolutional matrix (feature map) of width 2
-        self.CNV2 = theano.shared(value = RND_VEC((2, self.vdim)))
-        # convolutional matrix (feature map) of width 3
-        self.CNV3 = theano.shared(value = RND_VEC((3, self.vdim)))
-        # convolutional matrix (feature map) of width 4
-        self.CNV4 = theano.shared(value = RND_VEC((4, self.vdim)))
-        # until we get to know the number of labels)
+        self.INDICES = TT.ivector(name = "INDICES")
+        # input to convolutional layer
+        self.CONV_IN = None
+        # three convolutional filters for strides of width 2
+        self.CONV2 = theano.shared(value = RND_VEC((3, 1, 2, self.vdim)), name = "CONV2")
+        # four convolutional filters for strides of width 3
+        self.CONV3 = theano.shared(value = RND_VEC((4, 1, 3, self.vdim)), name = "CONV3")
+        # five convolutional filters for strides of width 4
+        self.CONV4 = theano.shared(value = RND_VEC((5, 1, 4, self.vdim)), name = "CONV4")
+        # map from hidden layer to output
         self.H2Y = None
         # bias vector for the output layer (1 x nlabels)
         self.YBV = None
         # private prediction function (will be initialized after training)
         self._predict = None
         # auxiliary variable for keeping track of parameters
-        self._params = []
+        self._params = [self.CONV2, self.CONV3, self.CONV4]
 
     def fit(self, a_trainset):
         """Train RNN model on the training set.
@@ -139,19 +147,60 @@ class RNNModel(object):
         @return \c void
 
         """
-        # estimate the number of distinct features
-        self.V = len(AUX_VEC_KEYS) + len(set([c for wlist, _ in a_trainset \
-                                              for w in wlist for c in w]))
+        # estimate the number of distinct features and the longest sequence
+        featset = set()
+        self.max_len = 0
+        for wlist, _ in a_trainset:
+            for w in wlist:
+                # append auxiliary items to training instances
+                w[:0] = [BEG]; w.append(END)
+                self.max_len = max(self.max_len, len(w))
+                featset.update(w)
+        self.V = len(AUX_VEC_KEYS) + len(featset)
+        del featset
+        # initialize zero matrix used for padding
+        # self._subzero = TT.zeros((self.max_len, self.vdim))
         # initialize embedding matrix for features
         self.EMB = theano.shared(value = RND_VEC((self.V, self.vdim)))
-        self._params.append(self.EMB)
+        # prepend embeddings matrix to the list of parameters to be trained
+        self._params[0:0] = [self.EMB]
         cnt = 0
         for ikey in AUX_VEC_KEYS:
             self.feat2idx[ikey] = cnt
             cnt += 1
-        # prepend embeddings matrix to the list of parameters to be trained
-        self._params[0:0] = [self.EMB]
         self.nlabels = len(set([t[1] for t in a_trainset]))
+
+        # initialize custom convolution function
+        print("Computing DIM_DIFF", file = sys.stderr)
+        print("DIM_DIFF computed", file = sys.stderr)
+        # remember the length of the input vector
+        ISHAPE = TT.shape(self.INDICES)[0]
+        # estimate the dimension for padding
+        PAD_WIDTH = TT.max([self.max_conv_len - ISHAPE, 0])
+        # perpare input for convolution
+        self.CONV_IN = TT.concatenate([self.EMB[self.INDICES], self._subzero[:PAD_WIDTH,:]], \
+                                          0).reshape((1, 1, ISHAPE + PAD_WIDTH, self.vdim))
+        print("CONV_IN computed", file = sys.stderr)
+        self.CONV2_OUT = TT.nnet.conv.conv2d(self.CONV_IN, self.CONV2)
+        self.CONV3_OUT = TT.nnet.conv.conv2d(self.CONV_IN, self.CONV3)
+        self.CONV4_OUT = TT.nnet.conv.conv2d(self.CONV_IN, self.CONV4)
+        f_conv2 = theano.function([self.INDICES], self.CONV2_OUT)
+        f_conv3 = theano.function([self.INDICES], self.CONV3_OUT)
+        f_conv4 = theano.function([self.INDICES], self.CONV4_OUT)
+
+        a_trainset = self._digitize_feats(a_trainset)
+        print("a_trainset =", repr(a_trainset), file = sys.stderr)
+        print("self.CONV2 =", self.CONV2.eval(), file = sys.stderr)
+        for x_i, y_i in a_trainset:
+            print("x_i =", repr(x_i), file = sys.stderr)
+            # print("y =", repr(y), file = sys.stderr)
+            for iword in x_i:
+                print("f_conv2 =", repr(f_conv2(iword)), file = sys.stderr)
+                print("f_conv3 =", repr(f_conv3(iword)), file = sys.stderr)
+                print("f_conv4 =", repr(f_conv4(iword)), file = sys.stderr)
+                break
+            break
+        sys.exit(66)
         # initialize prediction matrix
         # self.H2Y = theano.shared(value = RND_VEC((self.vdim, self.nlabels)))
         # self.YBV = theano.shared(value = RND_VEC((1, self.nlabels)))
@@ -254,7 +303,7 @@ class RNNModel(object):
             # convert features to indices and append new training
             # instance
             ret.append((self._feat2idcs(iseq, a_add = True), dlabel))
-            sys.exit(66)
+            break
         return ret
 
     def _feat2idcs(self, a_seq, a_add = False):
@@ -267,22 +316,27 @@ class RNNModel(object):
         @return list of lists of feature indices within a given context
 
         """
-        # print("a_seq = ", repr(a_seq), file = sys.stderr)
+        print("self.max_len = ", repr(self.max_len), file = sys.stderr)
+        print("a_seq = ", repr(a_seq), file = sys.stderr)
         # initialize matrix of feature indices
         ditems = []
         # convert features to vector indices
-        feat_idcs = []
+        feat_idcs = None
         cfeats = len(self.feat2idx)
         for iword in a_seq:
+            feat_idcs = []
             # append auxiliary items
-            iword[:0] = [BEG]; iword.append(END)
             for ichar in iword:
                 if a_add and ichar not in self.feat2idx:
                     self.feat2idx[ichar] = cfeats
                     cfeats += 1
                 feat_idcs.append(self.feat2idx.get(ichar, UNK))
-            ditems.append(self.EMB[feat_idcs])
-            del feat_idcs[:]
+            # pad with zeros
+            # emb = TT.concatenate([self.EMB[feat_idcs], \
+            #                           self._subzero[:max(self.max_conv_len - len(iword), 0),:]], 0)
+            # print("EMB: ", repr(emb.eval()))
+            # ditems.append(emb.reshape((1, 1, max(self.max_conv_len, len(iword)), self.vdim)))
+            ditems.append(feat_idcs)
         # print("ditems = ", repr([i.shape.eval() for i in ditems]), file = sys.stderr)
         return ditems
 
