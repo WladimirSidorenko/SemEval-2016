@@ -121,14 +121,27 @@ class RNNModel(object):
         # matrix of items' embeddings (either words or characters)
         self.EMB = None
         self.INDICES = TT.ivector(name = "INDICES")
-        # input to convolutional layer
-        self.CONV_IN = None
+        # number of embeddings per training item
+        self.M_EMB = TT.shape(self.INDICES)[0]
+        # number of padding rows
+        self.M_PAD = TT.max([self.max_conv_len - self.M_EMB, 0])
+        # length of input
+        self.IN_LEN = self.M_EMB + self.M_PAD
         # three convolutional filters for strides of width 2
-        self.CONV2 = theano.shared(value = RND_VEC((3, 1, 2, self.vdim)), name = "CONV2")
+        self.n_conv2 = 3 # number of filters
+        self.conv2_width = 2 # width of stride
+        self.CONV2 = theano.shared(value = RND_VEC((self.n_conv2, 1, self.conv2_width, self.vdim)), \
+                                       name = "CONV2")
         # four convolutional filters for strides of width 3
-        self.CONV3 = theano.shared(value = RND_VEC((4, 1, 3, self.vdim)), name = "CONV3")
+        self.n_conv3 = 4 # number of filters
+        self.conv3_width = 3 # width of stride
+        self.CONV3 = theano.shared(value = RND_VEC((self.n_conv3, 1, self.conv3_width, self.vdim)), \
+                                       name = "CONV3")
         # five convolutional filters for strides of width 4
-        self.CONV4 = theano.shared(value = RND_VEC((5, 1, 4, self.vdim)), name = "CONV4")
+        self.n_conv4 = 5 # number of filters
+        self.conv4_width = 4 # width of stride
+        self.CONV4 = theano.shared(value = RND_VEC((self.n_conv4, 1, self.conv4_width, self.vdim)), \
+                                       name = "CONV4")
         # map from hidden layer to output
         self.H2Y = None
         # bias vector for the output layer (1 x nlabels)
@@ -158,10 +171,29 @@ class RNNModel(object):
                 featset.update(w)
         self.V = len(AUX_VEC_KEYS) + len(featset)
         del featset
-        # initialize zero matrix used for padding
-        # self._subzero = TT.zeros((self.max_len, self.vdim))
+
         # initialize embedding matrix for features
         self.EMB = theano.shared(value = RND_VEC((self.V, self.vdim)))
+        # embeddings obtained for specific indices
+        self.EMB_I = self.EMB[self.INDICES]
+        # input to convolutional layer
+        self.CONV_IN = TT.concatenate([self.EMB_I, self._subzero[:self.M_PAD,:]], \
+                                          0).reshape((1, 1, self.IN_LEN, self.vdim))
+        self.CONV2_OUT = TT.reshape(TT.nnet.conv.conv2d(self.CONV_IN, self.CONV2), \
+                                        (self.n_conv2, self.IN_LEN - self.conv2_width + 1)).T
+        self.CONV2_MAX_OUT = self.CONV2_OUT[TT.argmax(TT.sum(self.CONV2_OUT, axis = 1)),:]
+        self.f_conv2 = theano.function([self.INDICES], self.CONV2_MAX_OUT)
+
+        self.CONV3_OUT = TT.reshape(TT.nnet.conv.conv2d(self.CONV_IN, self.CONV3), \
+                                        (self.n_conv3, self.IN_LEN - self.conv3_width + 1)).T
+        self.CONV3_MAX_OUT = self.CONV3_OUT[TT.argmax(TT.sum(self.CONV3_OUT, axis = 1)),:]
+        self.f_conv3 = theano.function([self.INDICES], self.CONV3_MAX_OUT)
+
+        self.CONV4_OUT = TT.reshape(TT.nnet.conv.conv2d(self.CONV_IN, self.CONV4), \
+                                        (self.n_conv4, self.IN_LEN - self.conv4_width + 1)).T
+        self.CONV4_MAX_OUT = self.CONV4_OUT[TT.argmax(TT.sum(self.CONV4_OUT, axis = 1)),:]
+        self.f_conv4 = theano.function([self.INDICES], self.CONV4_MAX_OUT)
+
         # prepend embeddings matrix to the list of parameters to be trained
         self._params[0:0] = [self.EMB]
         cnt = 0
@@ -170,34 +202,37 @@ class RNNModel(object):
             cnt += 1
         self.nlabels = len(set([t[1] for t in a_trainset]))
 
-        # initialize custom convolution function
-        print("Computing DIM_DIFF", file = sys.stderr)
-        print("DIM_DIFF computed", file = sys.stderr)
-        # remember the length of the input vector
-        ISHAPE = TT.shape(self.INDICES)[0]
-        # estimate the dimension for padding
-        PAD_WIDTH = TT.max([self.max_conv_len - ISHAPE, 0])
-        # perpare input for convolution
-        self.CONV_IN = TT.concatenate([self.EMB[self.INDICES], self._subzero[:PAD_WIDTH,:]], \
-                                          0).reshape((1, 1, ISHAPE + PAD_WIDTH, self.vdim))
-        print("CONV_IN computed", file = sys.stderr)
-        self.CONV2_OUT = TT.nnet.conv.conv2d(self.CONV_IN, self.CONV2)
-        self.CONV3_OUT = TT.nnet.conv.conv2d(self.CONV_IN, self.CONV3)
-        self.CONV4_OUT = TT.nnet.conv.conv2d(self.CONV_IN, self.CONV4)
-        f_conv2 = theano.function([self.INDICES], self.CONV2_OUT)
-        f_conv3 = theano.function([self.INDICES], self.CONV3_OUT)
-        f_conv4 = theano.function([self.INDICES], self.CONV4_OUT)
+        # auxiliary debug methods
+        # CONV2_OUT = TT.nnet.conv.conv2d(self.CONV_IN, self.CONV2)
+        # CONV2_OUT_RESHAPE = TT.reshape(CONV2_OUT, (self.n_conv2, self.IN_LEN - self.conv2_width + 1)).T
+        # CONV2_MAX_OUT = CONV2_OUT_RESHAPE[TT.argmax(TT.sum(self.CONV2_OUT, axis = 1)),:]
+
+        # get_ilen = theano.function([self.INDICES], self.IN_LEN)
+        get_emb = theano.function([self.INDICES], self.EMB_I)
+        # get_conv_in = theano.function([self.INDICES], self.CONV_IN)
+        # get_conv_out = theano.function([self.INDICES], CONV2_OUT)
+        # get_conv_out_reshape = theano.function([self.INDICES], CONV2_OUT_RESHAPE)
+        # get_conv_out_max = theano.function([self.INDICES], CONV2_MAX_OUT)
 
         a_trainset = self._digitize_feats(a_trainset)
-        print("a_trainset =", repr(a_trainset), file = sys.stderr)
-        print("self.CONV2 =", self.CONV2.eval(), file = sys.stderr)
+        # print("a_trainset =", repr(a_trainset), file = sys.stderr)
+        # print("self.CONV2 =", self.CONV2.eval(), file = sys.stderr)
         for x_i, y_i in a_trainset:
             print("x_i =", repr(x_i), file = sys.stderr)
             # print("y =", repr(y), file = sys.stderr)
             for iword in x_i:
-                print("f_conv2 =", repr(f_conv2(iword)), file = sys.stderr)
-                print("f_conv3 =", repr(f_conv3(iword)), file = sys.stderr)
-                print("f_conv4 =", repr(f_conv4(iword)), file = sys.stderr)
+                print("emb_i = ", repr(get_emb(iword)), file = sys.stderr)
+                # print("conv_in = ", repr(get_conv_in(iword)), file = sys.stderr)
+                # print("ILEN = ", repr(get_ilen(iword)), file = sys.stderr)
+                # print("conv2 =", repr(get_conv_out(iword)), file = sys.stderr)
+                # print("conv2.reshape =", repr(get_conv_out_reshape(iword)), file = sys.stderr)
+                # print("conv2.max =", repr(get_conv_out_max(iword)), file = sys.stderr)
+                # print("conv2_max =", repr(get_conv_out_max(iword)), file = sys.stderr)
+                print("self.conv2_max =", repr(self.f_conv2(iword)), file = sys.stderr)
+                print("self.conv3_max =", repr(self.f_conv3(iword)), file = sys.stderr)
+                print("self.conv4_max =", repr(self.f_conv4(iword)), file = sys.stderr)
+                # print("f_conv3 =", repr(self.f_conv3(iword)), file = sys.stderr)
+                # print("f_conv4 =", repr(self.f_conv4(iword)), file = sys.stderr)
                 break
             break
         sys.exit(66)
