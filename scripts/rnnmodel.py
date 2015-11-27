@@ -34,6 +34,8 @@ INF = float("inf")
 ALPHA = 5e-3
 EPSILON = 1e-5
 MAX_ITERS = 50
+ADADELTA = 0
+SGD = 1
 
 # default dimension of input vectors
 VEC_DIM = 4                     # 32
@@ -60,22 +62,17 @@ AUX_VEC_KEYS = [UNK, BEG, END]
 
 ##################################################################
 # Methods
-def _iwindow(seq, n=2):
-    """Iterate over data with a sliding window (of width n)
+def _rnd_orth_mtx(a_dim):
+    """Return orthogonal matrix with random weights.
 
-    @param seq - sequence to iterate over
-    @param n - width of the window
+    @param a_dim - dimensionality of square matrix
 
-    @return window-sized iterator over sequence
+    @return orthogonal Theano matrix with random weights
 
     """
-    it = iter(seq)
-    result = tuple(islice(it, n))
-    if len(result) == n:
-        yield result
-    for elem in it:
-        result = result[1:] + (elem,)
-        yield result
+    W = np.random.randn(a_dim, a_dim)
+    u, _, _ = numpy.linalg.svd(W)
+    return u.astype(config.floatX)
 
 ##################################################################
 # Class
@@ -98,10 +95,11 @@ class RNNModel(object):
 
     """
 
-    def __init__(self, a_vdim = VEC_DIM):
+    def __init__(self, a_vdim = VEC_DIM, a_use_dropout = True):
         """Class constructor.
 
         @param a_vdim - default dimensionality of embedding vectors
+        @param a_use_dropout - boolean flag indicating whether to use dropout
 
         """
         self.V = 0              # vocabulary size
@@ -116,6 +114,7 @@ class RNNModel(object):
         self.int2coeff = dict()
         self.feat2idx = dict()
         self.alpha = ALPHA
+        self.use_dropout = a_use_dropout
         # NN parameters to be learned
         self._params = []
 
@@ -128,17 +127,21 @@ class RNNModel(object):
         self.CONV2_OUT = self.CONV3_OUT = self.CONV4_OUT = None
         # max-sample output of convolutional layers
         self.CONV2_MAX_OUT = self.CONV3_MAX_OUT = self.CONV4_MAX_OUT = self.CONV_MAX_OUT = None
+        # custom recurrence function (hiding LSTM)
+        self._recurrence = None
         # map from hidden layer to output and bias for the output layer
         self.H = self.H2Y = self.Y_BIAS = None
 
         # the remianing parameters will be initialized immediately
         self._init_params()
 
-    def fit(self, a_trainset):
+    def fit(self, a_trainset, a_batch_size = 16, a_optimizer = ADADELTA):
         """Train RNN model on the training set.
 
         @param a_trainset - trainig set as a list of 2-tuples with
                             training instances and classes
+        @param a_batch_size - size of single training batch
+        @param a_optimizer - optimizer to use (ADADELTA or SGD)
 
         @return \c void
 
@@ -206,45 +209,6 @@ class RNNModel(object):
             break
         sys.exit(66)
 
-        # # define custom recursive function
-        # def _recurrence(x_t):
-        #     # embedding layer
-        #     emb_t = self.EMB[x_t].reshape([1, CW * self.vdim], ndim = 2)
-        #     # embedding layer propagated via tensor
-        #     # in_t = TT.dot(TT.tensordot(emb_t, self.E2H, [[1], [1]]), emb_t.T)
-        #     # in_t = in_t.reshape([1, self.vdim], ndim = 2)
-        #     # print("in_t.shape", repr(in_t.shape), file = sys.stderr)
-        #     # 0-th hidden layer
-        #     h0_t = TT.nnet.relu(TT.dot(emb_t, self.E2H) + self.H0BV, 0.5)
-        #     h1_t = TT.nnet.sigmoid(TT.dot(h0_t, self.H02H1) + self.H1BV)
-        #     h2_t = TT.nnet.relu(TT.dot(h1_t, self.H12H2) + self.H2BV)
-        #     # print("h_t.shape", repr(h_t.shape), file = sys.stderr)
-        #     s_t = TT.nnet.softmax(TT.dot(h2_t, self.H2Y) + self.YBV)
-        #     return [s_t]
-
-        # # auxiliary variables used for training
-        # X = TT.lmatrix('X')
-        # # y = TT.vector('y')
-        # y = TT.iscalar('y')
-        # s, _ = theano.scan(fn = _recurrence, sequences = X, \
-        #                    n_steps = X.shape[0])
-
-        # p_y_given_x_lastword = s[-1,0,:]
-        # y_pred = TT.argmax(p_y_given_x_lastword, axis = 0)
-        # score = p_y_given_x_lastword[y_pred]
-        # nll = -TT.log(p_y_given_x_lastword)[y]
-        # # nll =  TT.sum(TT.pow(y - TT.log(p_y_given_x_lastword), 2))
-        # gradients = TT.grad(nll, self._params)
-        # updates = OrderedDict((p, p - self.alpha * g) for p, g in \
-        #                           zip(self._params , gradients))
-        # # compile training function
-        # train = theano.function(inputs = [x, y], outputs = nll, updates = updates)
-        # convert symbolic features to embedding indices
-        a_trainset = self._digitize_feats(a_trainset)
-        sys.exit(66)
-        # perform training
-        prev_s = s = INF
-        # set prediction function
         self._predict = theano.function(inputs = [x], outputs = [y_pred, score])
         for _ in xrange(MAX_ITERS):
             s = 0.
@@ -346,7 +310,7 @@ class RNNModel(object):
         @return \c void
 
         """
-        self.n_hidden = self.vdim
+        self.n_hidden = self.n_lstm = self.vdim
         # auxiliary zero matrix used for padding the input
         self._subzero = TT.zeros((self.max_conv_len, self.vdim))
         self.INDICES = TT.ivector(name = "INDICES")
@@ -356,6 +320,10 @@ class RNNModel(object):
         self.M_PAD = TT.max([self.max_conv_len - self.M_EMB, 0])
         # length of input
         self.IN_LEN = self.M_EMB + self.M_PAD
+
+        ################
+        # CONVOLUTIONS #
+        ################
         # three convolutional filters for strides of width 2
         self.n_conv2 = 3 # number of filters
         self.conv2_width = 2 # width of stride
@@ -374,15 +342,21 @@ class RNNModel(object):
         self.CONV4 = theano.shared(value = RND_VEC((self.n_conv4, 1, self.conv4_width, self.vdim)), \
                                        name = "CONV4")
         self.CONV4_BIAS = theano.shared(value = RND_VEC((1, self.n_conv4)), name = "CONV4_BIAS")
-        # map from output convolutions to a hidden layer
-        self.CONV2H = theano.shared(value = RND_VEC((sum([self.n_conv2, self.n_conv3, \
-                                                          self.n_conv4]), self.n_hidden)), \
-                                    name = "CONV2H")
-        self.H_BIAS = theano.shared(value = RND_VEC((1, self.n_hidden)), name = "H_BIAS")
         # remember parameters to be learned
         self._params += [self.CONV2, self.CONV3, self.CONV4, \
-                         self.CONV2_BIAS, self.CONV3_BIAS, self.CONV4_BIAS, \
-                         self.CONV2H, self.H_BIAS]
+                         self.CONV2_BIAS, self.CONV3_BIAS, self.CONV4_BIAS]
+        ########
+        # LSTM #
+        ########
+        self.LSTM_W = theano.shared(value = np.concatenate([_rnd_orth_mtx(self.n_lstm) \
+                                                                for _ in xrange(4)], axis = 1), \
+                                        name = "LSTM_W")
+        self.LSTM_U = theano.shared(value = np.concatenate([_rnd_orth_mtx(self.n_lstm) \
+                                                                for _ in xrange(4)], axis = 1), \
+                                        name = "LSTM_U")
+        self.LSTM_BIAS = theano.shared(RND_VEC((1, self.n_lstm * 4)), name = "LSTM_BIAS")
+        self._params += [self.LSTM_W, self.LSTM_U, self.LSTM_BIAS]
+
 
     def _init_emb(self):
         """Initialize embeddings.
@@ -426,8 +400,8 @@ class RNNModel(object):
         self.CONV4_MAX_OUT = self.CONV4_OUT[TT.argmax(TT.sum(self.CONV4_OUT, axis = 1)),:] + \
                              self.CONV4_BIAS
         # output convolutions
-        self.CONV_MAX_OUT = TT.nnet.sigmoid(TT.concatenate([self.CONV2_MAX_OUT, self.CONV3_MAX_OUT, \
-                                                            self.CONV4_MAX_OUT], axis = 1))
+        self.CONV_MAX_OUT = TT.nnet.relu(TT.concatenate([self.CONV2_MAX_OUT, self.CONV3_MAX_OUT, \
+                                                             self.CONV4_MAX_OUT], axis = 1))
 
     def _init_lstm(self):
         """Initialize parameters of LSTM layer.
@@ -435,20 +409,7 @@ class RNNModel(object):
         @return \c void
 
         """
-        def _recurrence(x_t):
-            # embedding layer
-            emb_t = self.EMB[x_t].reshape([1, CW * self.vdim], ndim = 2)
-            # embedding layer propagated via tensor
-            # in_t = TT.dot(TT.tensordot(emb_t, self.E2H, [[1], [1]]), emb_t.T)
-            # in_t = in_t.reshape([1, self.vdim], ndim = 2)
-            # print("in_t.shape", repr(in_t.shape), file = sys.stderr)
-            # 0-th hidden layer
-            h0_t = TT.nnet.relu(TT.dot(emb_t, self.E2H) + self.H0BV, 0.5)
-            h1_t = TT.nnet.sigmoid(TT.dot(h0_t, self.H02H1) + self.H1BV)
-            h2_t = TT.nnet.relu(TT.dot(h1_t, self.H12H2) + self.H2BV)
-            # print("h_t.shape", repr(h_t.shape), file = sys.stderr)
-            s_t = TT.nnet.softmax(TT.dot(h2_t, self.H2Y) + self.YBV)
-            return [s_t]
+        pass
 
     def _reset(self):
         """Reset instance variables.
@@ -481,4 +442,44 @@ class RNNModel(object):
 # get_H = theano.function([self.INDICES], self.H)
 # get_Y = theano.function([self.INDICES], self.Y)
 # get_y_pred = theano.function([self.INDICES], y_pred)
-        # get_cost = theano.function([self.INDICES, y], cost)
+# get_cost = theano.function([self.INDICES, y], cost)
+
+# # define custom recursive function
+# def _recurrence(x_t):
+#     # embedding layer
+#     emb_t = self.EMB[x_t].reshape([1, CW * self.vdim], ndim = 2)
+#     # embedding layer propagated via tensor
+#     # in_t = TT.dot(TT.tensordot(emb_t, self.E2H, [[1], [1]]), emb_t.T)
+#     # in_t = in_t.reshape([1, self.vdim], ndim = 2)
+#     # print("in_t.shape", repr(in_t.shape), file = sys.stderr)
+#     # 0-th hidden layer
+#     h0_t = TT.nnet.relu(TT.dot(emb_t, self.E2H) + self.H0BV, 0.5)
+#     h1_t = TT.nnet.sigmoid(TT.dot(h0_t, self.H02H1) + self.H1BV)
+#     h2_t = TT.nnet.relu(TT.dot(h1_t, self.H12H2) + self.H2BV)
+#     # print("h_t.shape", repr(h_t.shape), file = sys.stderr)
+#     s_t = TT.nnet.softmax(TT.dot(h2_t, self.H2Y) + self.YBV)
+#     return [s_t]
+
+# # auxiliary variables used for training
+# X = TT.lmatrix('X')
+# # y = TT.vector('y')
+# y = TT.iscalar('y')
+# s, _ = theano.scan(fn = _recurrence, sequences = X, \
+#                    n_steps = X.shape[0])
+
+# p_y_given_x_lastword = s[-1,0,:]
+# y_pred = TT.argmax(p_y_given_x_lastword, axis = 0)
+# score = p_y_given_x_lastword[y_pred]
+# nll = -TT.log(p_y_given_x_lastword)[y]
+# # nll =  TT.sum(TT.pow(y - TT.log(p_y_given_x_lastword), 2))
+# gradients = TT.grad(nll, self._params)
+# updates = OrderedDict((p, p - self.alpha * g) for p, g in \
+#                           zip(self._params , gradients))
+# # compile training function
+# train = theano.function(inputs = [x, y], outputs = nll, updates = updates)
+# convert symbolic features to embedding indices
+# a_trainset = self._digitize_feats(a_trainset)
+# sys.exit(66)
+# perform training
+# prev_s = s = INF
+# set prediction function
