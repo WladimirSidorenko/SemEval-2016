@@ -22,6 +22,7 @@ import numpy as np
 import sys
 import theano
 
+from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
 from theano import config, printing, tensor as TT
 from collections import OrderedDict
 from itertools import chain
@@ -119,11 +120,10 @@ class RNNModel(object):
 
     """
 
-    def __init__(self, a_vdim = VEC_DIM, a_use_dropout = True):
+    def __init__(self, a_vdim = VEC_DIM):
         """Class constructor.
 
         @param a_vdim - default dimensionality of embedding vectors
-        @param a_use_dropout - boolean flag indicating whether to use dropout
 
         """
         self.V = 0              # vocabulary size
@@ -138,7 +138,8 @@ class RNNModel(object):
         self.int2coeff = dict()
         self.feat2idx = dict()
         self.alpha = ALPHA
-        self.use_dropout = a_use_dropout
+        self.optimizer = ADADELTA
+        self.use_dropout = False
         # NN parameters to be learned
         self._params = []
 
@@ -161,17 +162,19 @@ class RNNModel(object):
         # the remianing parameters will be initialized immediately
         self._init_params()
 
-    def fit(self, a_trainset, a_batch_size = 16, a_optimizer = ADADELTA):
+    def fit(self, a_trainset, a_use_dropout = True, a_batch_size = 16, a_optimizer = ADADELTA):
         """Train RNN model on the training set.
 
         @param a_trainset - trainig set as a list of 2-tuples with
                             training instances and classes
+        @param a_use_dropout - boolean flag indicating whether to use dropout
         @param a_batch_size - size of single training batch
         @param a_optimizer - optimizer to use (ADADELTA or SGD)
 
         @return \c void
 
         """
+        self.use_dropout = a_use_dropout
         # estimate the number of distinct features and the longest sequence
         featset = set()
         self.max_len = 0
