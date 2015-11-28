@@ -168,6 +168,7 @@ def lstm_layer(tparams, state_below, options, prefix='lstm', mask=None):
             return _x[:, :, n * dim:(n + 1) * dim]
         return _x[:, n * dim:(n + 1) * dim]
 
+    # sequences, previous results, non-sequences
     def _step(m_, x_, h_, c_):
         preact = tensor.dot(h_, tparams[_p(prefix, 'U')])
         preact += x_

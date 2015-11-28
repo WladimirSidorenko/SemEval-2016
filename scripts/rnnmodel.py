@@ -22,7 +22,7 @@ import numpy as np
 import sys
 import theano
 
-from theano import printing, tensor as TT
+from theano import config, printing, tensor as TT
 from collections import OrderedDict
 from itertools import chain
 
@@ -62,6 +62,30 @@ AUX_VEC_KEYS = [UNK, BEG, END]
 
 ##################################################################
 # Methods
+def _floatX(data):
+    """Return numpy array populated with the given data.
+
+    @param data - input tensor
+
+    @return numpy array populated with the given data
+
+    """
+    return np.asarray(data, dtype = config.floatX)
+
+def _slice(_x, n, dim):
+    """Return slice of input tensor from the last two dimensions.
+
+    @param _x - input tensor
+    @param n - input tensor
+    @param dim - input tensor
+
+    @return tensor of size `n * dim x (n + 1) * dim`
+
+    """
+    if _x.ndim == 3:
+        return _x[:, :, n * dim:(n + 1) * dim]
+    return _x[:, n * dim:(n + 1) * dim]
+
 def _rnd_orth_mtx(a_dim):
     """Return orthogonal matrix with random weights.
 
@@ -125,12 +149,14 @@ class RNNModel(object):
         self.EMB = self.EMB_I = self.CONV_IN = None
         # output of convolutional layers
         self.CONV2_OUT = self.CONV3_OUT = self.CONV4_OUT = None
+        # custom function for converting embeddings into convolutions
+        self.emb2conv = None
         # max-sample output of convolutional layers
         self.CONV2_MAX_OUT = self.CONV3_MAX_OUT = self.CONV4_MAX_OUT = self.CONV_MAX_OUT = None
         # custom recurrence function (hiding LSTM)
         self._recurrence = None
         # map from hidden layer to output and bias for the output layer
-        self.H = self.H2Y = self.Y_BIAS = None
+        self.LSTM_OUT = self.LSTM_OUT2Y = self.Y_BIAS = None
 
         # the remianing parameters will be initialized immediately
         self._init_params()
@@ -164,14 +190,16 @@ class RNNModel(object):
 
         # initialize convolutional layers
         self._init_conv()
+        self.emb2conv = theano.function([self.INDICES], self.CONV_MAX_OUT, \
+                                            name = "emb2conv")
 
         # initialize LSTM layer
         self._init_lstm()
 
-        # hidden layer
-        self.H = TT.nnet.relu(TT.dot(self.CONV_MAX_OUT, self.CONV2H) + self.H_BIAS)
+        # output layer
+        self.LSTM = TT.nnet.relu(TT.dot(self.CONV_MAX_OUT, self.CONV2H) + self.H_BIAS)
         # mapping from hidden layer to output
-        self.H2Y = theano.shared(value = RND_VEC((self.n_hidden, self.n_labels)),
+        self.LSTM2Y = theano.shared(value = RND_VEC((self.n_hidden, self.n_labels)),
                                  name = "H2Y")
         # output bias
         self.Y_BIAS = theano.shared(value = RND_VEC((1, self.n_labels)),
@@ -409,7 +437,59 @@ class RNNModel(object):
         @return \c void
 
         """
-        pass
+        # single LSTM recurrence step function
+        def _lstm_step(x_, o_, m_):
+            """Single LSTM recurrence step.
+
+            @param x_ - indices of input characters
+            @param o_ - previous output
+            @param m_ - previous state of memory cell
+
+            @return 2-tuple (new hidden and memory cell)
+
+            """
+            # obtain character convolutions for input indices
+            iconv = self.emb2con(x)
+            # common term for all LSTM components
+            proxy = TT.dot(x_, self.LSTM_W) + TT.dot(o_, self.LSTM_U) + \
+                self.LSTM_BIAS
+            # input
+            i = TT.nnet.sigmoid(_slice(proxy, 0, self.n_lstm))
+            # forget
+            f = TT.nnet.sigmoid(_slice(proxy, 1, self.n_lstm))
+            # output
+            o = TT.nnet.sigmoid(_slice(proxy, 2, self.n_lstm))
+            # new state of memory cell (input * current + forget * previous)
+            m = i * TT.tanh(_slice(proxy, 3, self.n_lstm)) + f * m_
+            # new state of hidden recurrence
+            o = o * TT.tanh(m)
+            # return new state of memory cell and state of hidden recurrence
+            return o, m
+        # `scan' function
+        res, updates = theano.scan(_lstm_step,
+                                    sequences=[mask, state_below],
+                                    outputs_info=[tensor.alloc(numpy_floatX(0.),
+                                                               n_samples,
+                                                               dim_proj),
+                                                  tensor.alloc(numpy_floatX(0.),
+                                                               n_samples,
+                                                               dim_proj)],
+                                    name=_p(prefix, '_layers'),
+                                    n_steps=nsteps)
+
+        # if self.use_dropout:
+        #     proj = dropout_layer(proj, use_noise, trng)
+
+        PROB = TT.nnet.softmax(TT.dot(res[-1], self.LSTM2Y) + self.Y_BIAS)
+        PRED = TT.argmax(prob, axis = 0)
+
+        f_pred_prob = theano.function([self.INDICES], [PRED, PROB], name='f_pred_prob')
+        f_pred = theano.function([self.INDICES], PRED, name='f_pred')
+        # gold label
+        Y = TT.iscalar('y')
+        cost = -TT.log(PRED[Y])
+
+        return (f_pred_prob, f_pred, cost)
 
     def _reset(self):
         """Reset instance variables.
