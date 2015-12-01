@@ -96,7 +96,7 @@ def _rnd_orth_mtx(a_dim):
 
     """
     W = np.random.randn(a_dim, a_dim)
-    u, _, _ = numpy.linalg.svd(W)
+    u, _, _ = np.linalg.svd(W)
     return u.astype(config.floatX)
 
 ##################################################################
@@ -157,7 +157,7 @@ class RNNModel(object):
         # custom recurrence function (hiding LSTM)
         self._recurrence = None
         # map from hidden layer to output and bias for the output layer
-        self.LSTM_OUT = self.LSTM_OUT2Y = self.Y_BIAS = None
+        self.LSTM2Y = self.Y_BIAS = self.Y = None
 
         # the remianing parameters will be initialized immediately
         self._init_params()
@@ -197,23 +197,24 @@ class RNNModel(object):
                                             name = "emb2conv")
 
         # initialize LSTM layer
-        self._init_lstm()
+        res, updates = self._init_lstm()
+        lstm_debug = theano.function([self.INDICES], [res, updates], name = "lstm_debug")
 
-        # output layer
-        self.LSTM = TT.nnet.relu(TT.dot(self.CONV_MAX_OUT, self.CONV2H) + self.H_BIAS)
-        # mapping from hidden layer to output
-        self.LSTM2Y = theano.shared(value = RND_VEC((self.n_hidden, self.n_labels)),
-                                 name = "H2Y")
+        # mapping from the LSTM layer to output
+        self.LSTM2Y = theano.shared(value = RND_VEC((self.n_lstm, self.n_labels)),
+                                    name = "LSTM2Y")
         # output bias
         self.Y_BIAS = theano.shared(value = RND_VEC((1, self.n_labels)),
                                     name = "Y_BIAS")
-        # add newly initialized weights to the parameters to be trained
-        self._params += [self.EMB, self.H2Y, self.Y_BIAS]
-
         # output layer
-        self.Y = TT.nnet.softmax(TT.dot(self.H, self.H2Y) + self.Y_BIAS)
-        # predicted label
+        self.Y = TT.nnet.softmax(TT.dot(res[-1], self.LSTM2Y) + self.Y_BIAS)
+
+        # add newly initialized weights to the parameters to be trained
+        self._params += [self.LSTM2Y, self.Y_BIAS]
+
+        # correct label
         y = TT.iscalar('y')
+        # predicted label
         y_pred = TT.argmax(self.Y, axis = 1)
 
         # cost gradients and updates
@@ -224,7 +225,7 @@ class RNNModel(object):
 
         # define training function and let training begin
         train = theano.function(inputs  = [self.INDICES, y, alpha], \
-                                outputs = cost, updates = updates)
+                                outputs = [cost], updates = updates)
 
         icost = None
         a_trainset = self._digitize_feats(a_trainset)
@@ -326,11 +327,6 @@ class RNNModel(object):
                     self.feat2idx[ichar] = cfeats
                     cfeats += 1
                 feat_idcs.append(self.feat2idx.get(ichar, UNK))
-            # pad with zeros
-            # emb = TT.concatenate([self.EMB[feat_idcs], \
-            #                           self._subzero[:max(self.max_conv_len - len(iword), 0),:]], 0)
-            # print("EMB: ", repr(emb.eval()))
-            # ditems.append(emb.reshape((1, 1, max(self.max_conv_len, len(iword)), self.vdim)))
             ditems.append(feat_idcs)
         # print("ditems = ", repr([i.shape.eval() for i in ditems]), file = sys.stderr)
         return ditems
@@ -388,7 +384,6 @@ class RNNModel(object):
         self.LSTM_BIAS = theano.shared(RND_VEC((1, self.n_lstm * 4)), name = "LSTM_BIAS")
         self._params += [self.LSTM_W, self.LSTM_U, self.LSTM_BIAS]
 
-
     def _init_emb(self):
         """Initialize embeddings.
 
@@ -433,11 +428,13 @@ class RNNModel(object):
         # output convolutions
         self.CONV_MAX_OUT = TT.nnet.relu(TT.concatenate([self.CONV2_MAX_OUT, self.CONV3_MAX_OUT, \
                                                              self.CONV4_MAX_OUT], axis = 1))
+        self._params += [self.LSTM2Y, self.Y_BIAS]
+
 
     def _init_lstm(self):
         """Initialize parameters of LSTM layer.
 
-        @return \c void
+        @return 2-tuple with result and updates of LSTM scan
 
         """
         # single LSTM recurrence step function
@@ -448,11 +445,11 @@ class RNNModel(object):
             @param o_ - previous output
             @param m_ - previous state of memory cell
 
-            @return 2-tuple (new hidden and memory cell)
+            @return 2-tuple (with the output and memory cells)
 
             """
             # obtain character convolutions for input indices
-            iconv = self.emb2con(x)
+            iconv = self.emb2conv(x_)
             # common term for all LSTM components
             proxy = TT.dot(x_, self.LSTM_W) + TT.dot(o_, self.LSTM_U) + \
                 self.LSTM_BIAS
@@ -470,29 +467,15 @@ class RNNModel(object):
             return o, m
         # `scan' function
         res, updates = theano.scan(_lstm_step,
-                                    sequences=[mask, state_below],
-                                    outputs_info=[tensor.alloc(numpy_floatX(0.),
-                                                               n_samples,
-                                                               dim_proj),
-                                                  tensor.alloc(numpy_floatX(0.),
-                                                               n_samples,
-                                                               dim_proj)],
-                                    name=_p(prefix, '_layers'),
-                                    n_steps=nsteps)
-
-        # if self.use_dropout:
-        #     proj = dropout_layer(proj, use_noise, trng)
-
-        PROB = TT.nnet.softmax(TT.dot(res[-1], self.LSTM2Y) + self.Y_BIAS)
-        PRED = TT.argmax(prob, axis = 0)
-
-        f_pred_prob = theano.function([self.INDICES], [PRED, PROB], name='f_pred_prob')
-        f_pred = theano.function([self.INDICES], PRED, name='f_pred')
-        # gold label
-        Y = TT.iscalar('y')
-        cost = -TT.log(PRED[Y])
-
-        return (f_pred_prob, f_pred, cost)
+                                   sequences = [self.INDICES],
+                                   outputs_info = [TT.alloc(_floatX(0.),
+                                                            self.INDICES.shape[0],
+                                                            self.n_lstm),
+                                                   TT.alloc(_floatX(0.),
+                                                            self.INDICES.shape[0],
+                                                            self.n_lstm)],
+                                   name = "_lstm_layers")
+        return (res, updates)
 
     def _reset(self):
         """Reset instance variables.
