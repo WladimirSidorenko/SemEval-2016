@@ -56,10 +56,11 @@ np.random.seed()
 RND_VEC = lambda a_dim = VEC_DIM: np.random.uniform(UMIN, UMAX, a_dim)
 
 # symbolic codes for auxiliary vectors
+EMP = "___%EMP%___"
 UNK = "___%UNK%___"
 BEG = "___%BEG%___"
 END = "___%END%___"
-AUX_VEC_KEYS = [UNK, BEG, END]
+AUX_VEC_KEYS = [EMP, UNK, BEG, END]
 
 ##################################################################
 # Methods
@@ -143,6 +144,8 @@ class RNNModel(object):
         # NN parameters to be learned
         self._params = []
 
+        # custom function for computing convolutions from indices
+        self._emb2conv = None
         # the parameters below will be initialized during training
         # private prediction function
         self._predict = None
@@ -150,8 +153,6 @@ class RNNModel(object):
         self.EMB = self.EMB_I = self.CONV_IN = None
         # output of convolutional layers
         self.CONV2_OUT = self.CONV3_OUT = self.CONV4_OUT = None
-        # custom function for converting embeddings into convolutions
-        self.emb2conv = None
         # max-sample output of convolutional layers
         self.CONV2_MAX_OUT = self.CONV3_MAX_OUT = self.CONV4_MAX_OUT = self.CONV_MAX_OUT = None
         # custom recurrence function (hiding LSTM)
@@ -191,15 +192,13 @@ class RNNModel(object):
         # initialize embedding matrix for features
         self._init_emb()
 
-        # initialize convolutional layers
+        # initialize embedding 2 convolutions function
         self._init_conv()
-        self.emb2conv = theano.function([self.INDICES], self.CONV_MAX_OUT, \
-                                            name = "emb2conv")
 
         # initialize LSTM layer
         res, updates = self._init_lstm()
-        lstm_debug = theano.function([self.INDICES], [res, updates], name = "lstm_debug")
 
+        print("res =", res, type(res))
         # mapping from the LSTM layer to output
         self.LSTM2Y = theano.shared(value = RND_VEC((self.n_lstm, self.n_labels)),
                                     name = "LSTM2Y")
@@ -224,7 +223,7 @@ class RNNModel(object):
         updates = OrderedDict((p, p - alpha * g) for p, g in zip(self._params , gradients))
 
         # define training function and let training begin
-        train = theano.function(inputs  = [self.INDICES, y, alpha], \
+        train = theano.function(inputs  = [self.W_INDICES, y, alpha], \
                                 outputs = [cost], updates = updates)
 
         icost = None
@@ -319,14 +318,21 @@ class RNNModel(object):
         # convert features to vector indices
         feat_idcs = None
         cfeats = len(self.feat2idx)
+        # determine maximum word length in sequence
+        max_len = max(max([len(w) for w in a_seq]), self.conv2_width, \
+                      self.conv3_width, self.conv4_width)
+        i = 0
         for iword in a_seq:
             feat_idcs = []
             # append auxiliary items
-            for ichar in iword:
+            for i, ichar in enumerate(iword):
                 if a_add and ichar not in self.feat2idx:
                     self.feat2idx[ichar] = cfeats
                     cfeats += 1
                 feat_idcs.append(self.feat2idx.get(ichar, UNK))
+            # pad indices with embeddings for empty character
+            if i < max_len:
+                feat_idcs += [self.feat2idx[EMP]] * (max_len - i)
             ditems.append(feat_idcs)
         # print("ditems = ", repr([i.shape.eval() for i in ditems]), file = sys.stderr)
         return ditems
@@ -340,9 +346,12 @@ class RNNModel(object):
         self.n_hidden = self.n_lstm = self.vdim
         # auxiliary zero matrix used for padding the input
         self._subzero = TT.zeros((self.max_conv_len, self.vdim))
-        self.INDICES = TT.ivector(name = "INDICES")
+        # matrix of char vectors, corresponding to single word
+        self.W_INDICES = TT.imatrix(name = "W_INDICES")
+        # matrix of char vectors, corresponding to single word
+        self.CHAR_INDICES = TT.ivector(name = "CHAR_INDICES")
         # number of embeddings per training item
-        self.M_EMB = TT.shape(self.INDICES)[0]
+        self.M_EMB = TT.shape(self.CHAR_INDICES)[0]
         # number of padding rows
         self.M_PAD = TT.max([self.max_conv_len - self.M_EMB, 0])
         # length of input
@@ -400,36 +409,47 @@ class RNNModel(object):
         self._params.append(self.EMB)
 
     def _init_conv(self):
-        """Initialize parameters of convolutional layer.
+        """Initialize function for computing convolutions from indices
 
         @return \c void
 
         """
-        # embeddings obtained for specific indices
-        self.EMB_I = self.EMB[self.INDICES]
-        # input to convolutional layer
-        self.CONV_IN = TT.concatenate([self.EMB_I, self._subzero[:self.M_PAD,:]], \
-                                          0).reshape((1, 1, self.IN_LEN, self.vdim))
-        # width-2 convolutions
-        self.CONV2_OUT = TT.reshape(TT.nnet.conv.conv2d(self.CONV_IN, self.CONV2), \
-                                        (self.n_conv2, self.IN_LEN - self.conv2_width + 1)).T
-        self.CONV2_MAX_OUT = self.CONV2_OUT[TT.argmax(TT.sum(self.CONV2_OUT, axis = 1)),:] + \
-                             self.CONV2_BIAS
-        # width-3 convolutions
-        self.CONV3_OUT = TT.reshape(TT.nnet.conv.conv2d(self.CONV_IN, self.CONV3), \
-                                        (self.n_conv3, self.IN_LEN - self.conv3_width + 1)).T
-        self.CONV3_MAX_OUT = self.CONV3_OUT[TT.argmax(TT.sum(self.CONV3_OUT, axis = 1)),:] + \
-                             self.CONV3_BIAS
-        # width-4 convolutions
-        self.CONV4_OUT = TT.reshape(TT.nnet.conv.conv2d(self.CONV_IN, self.CONV4), \
-                                        (self.n_conv4, self.IN_LEN - self.conv4_width + 1)).T
-        self.CONV4_MAX_OUT = self.CONV4_OUT[TT.argmax(TT.sum(self.CONV4_OUT, axis = 1)),:] + \
-                             self.CONV4_BIAS
-        # output convolutions
-        self.CONV_MAX_OUT = TT.nnet.relu(TT.concatenate([self.CONV2_MAX_OUT, self.CONV3_MAX_OUT, \
-                                                             self.CONV4_MAX_OUT], axis = 1))
-        self._params += [self.LSTM2Y, self.Y_BIAS]
+        def _emb2conv(a_x):
+            """Private function for computing convolutions from indices
 
+            @param a_x - indices of embeddings
+
+            @return max convolutions computed from these indices
+
+            """
+            # embeddings obtained for specific indices
+            emb_i = self.EMB[a_x]
+            m_emb = a_x.shape[0]
+            m_pad = TT.max([self.max_conv_len - m_emb, 0])
+            in_len = m_emb + m_pad
+            # input to convolutional layer
+            conv_in = TT.concatenate([emb_i, self._subzero[:m_pad,:]], \
+                                     0).reshape((1, 1, in_len, self.vdim))
+            # width-2 convolutions
+            conv2_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV2), \
+                                   (self.n_conv2, in_len - self.conv2_width + 1)).T
+            conv2_max_out = conv2_out[TT.argmax(TT.sum(conv2_out, axis = 1)),:] + \
+                            self.CONV2_BIAS
+            # width-3 convolutions
+            conv3_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV3), \
+                                   (self.n_conv3, in_len - self.conv3_width + 1)).T
+            conv3_max_out = conv3_out[TT.argmax(TT.sum(conv3_out, axis = 1)),:] + \
+                            self.CONV3_BIAS
+            # width-4 convolutions
+            conv4_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV4), \
+                                   (self.n_conv4, in_len - self.conv4_width + 1)).T
+            conv4_max_out = conv4_out[TT.argmax(TT.sum(conv4_out, axis = 1)),:] + \
+                            self.CONV4_BIAS
+            # output convolutions
+            conv_max_out = TT.nnet.relu(TT.concatenate([conv2_max_out, conv3_max_out, \
+                                                        conv4_max_out], axis = 1))
+            return conv_max_out
+        self._emb2conv = _emb2conv
 
     def _init_lstm(self):
         """Initialize parameters of LSTM layer.
@@ -449,9 +469,9 @@ class RNNModel(object):
 
             """
             # obtain character convolutions for input indices
-            iconv = self.emb2conv(x_)
+            iconv = self._emb2conv(x_)
             # common term for all LSTM components
-            proxy = TT.dot(x_, self.LSTM_W) + TT.dot(o_, self.LSTM_U) + \
+            proxy = TT.dot(iconv, self.LSTM_W) + TT.dot(o_, self.LSTM_U) + \
                 self.LSTM_BIAS
             # input
             i = TT.nnet.sigmoid(_slice(proxy, 0, self.n_lstm))
@@ -467,12 +487,12 @@ class RNNModel(object):
             return o, m
         # `scan' function
         res, updates = theano.scan(_lstm_step,
-                                   sequences = [self.INDICES],
+                                   sequences = [self.W_INDICES],
                                    outputs_info = [TT.alloc(_floatX(0.),
-                                                            self.INDICES.shape[0],
+                                                            self.W_INDICES.shape[0],
                                                             self.n_lstm),
                                                    TT.alloc(_floatX(0.),
-                                                            self.INDICES.shape[0],
+                                                            self.W_INDICES.shape[0],
                                                             self.n_lstm)],
                                    name = "_lstm_layers")
         return (res, updates)
