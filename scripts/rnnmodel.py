@@ -196,47 +196,50 @@ class RNNModel(object):
         self._init_conv()
 
         # initialize LSTM layer
-        res, updates = self._init_lstm()
+        lstm_out = self._init_lstm()
+        lstm_debug = theano.function([self.W_INDICES], lstm_out, name = "lstm_debug")
 
-        print("res =", res, type(res))
+        print("res =", lstm_out[-1], type(lstm_out[-1]))
+        print("res.ndim =", lstm_out[-1][-1].ndim)
         # mapping from the LSTM layer to output
         self.LSTM2Y = theano.shared(value = RND_VEC((self.n_lstm, self.n_labels)),
                                     name = "LSTM2Y")
         # output bias
         self.Y_BIAS = theano.shared(value = RND_VEC((1, self.n_labels)),
                                     name = "Y_BIAS")
-        # output layer
-        self.Y = TT.nnet.softmax(TT.dot(res[-1], self.LSTM2Y) + self.Y_BIAS)
+        # # output layer
+        # self.Y = TT.nnet.softmax(TT.dot(lstm_out[0], self.LSTM2Y) + self.Y_BIAS)
 
         # add newly initialized weights to the parameters to be trained
         self._params += [self.LSTM2Y, self.Y_BIAS]
 
         # correct label
-        y = TT.iscalar('y')
-        # predicted label
-        y_pred = TT.argmax(self.Y, axis = 1)
+        # y = TT.iscalar('y')
+        # # predicted label
+        # y_pred = TT.argmax(self.Y, axis = 1)
 
-        # cost gradients and updates
-        alpha = TT.scalar("alpha")
-        cost = -TT.log(self.Y[0,y])
-        gradients = TT.grad(cost, self._params)
-        updates = OrderedDict((p, p - alpha * g) for p, g in zip(self._params , gradients))
+        # # cost gradients and updates
+        # alpha = TT.scalar("alpha")
+        # cost = -TT.log(self.Y[0,y])
+        # gradients = TT.grad(cost, self._params)
+        # updates = OrderedDict((p, p - alpha * g) for p, g in zip(self._params , gradients))
 
-        # define training function and let training begin
-        train = theano.function(inputs  = [self.W_INDICES, y, alpha], \
-                                outputs = [cost], updates = updates)
+        # # define training function and let training begin
+        # train = theano.function(inputs  = [self.W_INDICES, y, alpha], \
+        #                         outputs = [cost], updates = updates)
 
         icost = None
         a_trainset = self._digitize_feats(a_trainset)
         for x_i, y_i in a_trainset:
             print("x_i =", repr(x_i), file = sys.stderr)
             print("y_i =", repr(y_i), file = sys.stderr)
-            for iword in x_i:
-                icost = train(iword, y_i, self.alpha)
-                print("icost =", repr(icost), file = sys.stderr)
-                # print("f_conv3 =", repr(self.f_conv3(iword)), file = sys.stderr)
-                # print("f_conv4 =", repr(self.f_conv4(iword)), file = sys.stderr)
-                break
+            print("lstm_debug =", repr(lstm_debug(x_i)), file = sys.stderr)
+            # for iword in x_i:
+            #     icost = train(iword, y_i, self.alpha)
+            #     print("icost =", repr(icost), file = sys.stderr)
+            #     # print("f_conv3 =", repr(self.f_conv3(iword)), file = sys.stderr)
+            #     # print("f_conv4 =", repr(self.f_conv4(iword)), file = sys.stderr)
+            #     break
             break
         sys.exit(66)
 
@@ -297,7 +300,8 @@ class RNNModel(object):
                 dlabel = dint
             # convert features to indices and append new training
             # instance
-            ret.append((self._feat2idcs(iseq, a_add = True), dlabel))
+            ret.append((np.asarray(self._feat2idcs(iseq, a_add = True), \
+                                   dtype = "int32"), dlabel))
             break
         return ret
 
@@ -311,8 +315,6 @@ class RNNModel(object):
         @return list of lists of feature indices within a given context
 
         """
-        print("self.max_len = ", repr(self.max_len), file = sys.stderr)
-        print("a_seq = ", repr(a_seq), file = sys.stderr)
         # initialize matrix of feature indices
         ditems = []
         # convert features to vector indices
@@ -321,18 +323,20 @@ class RNNModel(object):
         # determine maximum word length in sequence
         max_len = max(max([len(w) for w in a_seq]), self.conv2_width, \
                       self.conv3_width, self.conv4_width)
-        i = 0
+        ilen = 0
         for iword in a_seq:
             feat_idcs = []
+            print("iword = ", repr(iword))
             # append auxiliary items
-            for i, ichar in enumerate(iword):
+            ilen = len(iword)
+            for ichar in iword:
                 if a_add and ichar not in self.feat2idx:
                     self.feat2idx[ichar] = cfeats
                     cfeats += 1
                 feat_idcs.append(self.feat2idx.get(ichar, UNK))
             # pad indices with embeddings for empty character
-            if i < max_len:
-                feat_idcs += [self.feat2idx[EMP]] * (max_len - i)
+            if ilen < max_len:
+                feat_idcs += [self.feat2idx[EMP]] * (max_len - ilen)
             ditems.append(feat_idcs)
         # print("ditems = ", repr([i.shape.eval() for i in ditems]), file = sys.stderr)
         return ditems
@@ -343,7 +347,6 @@ class RNNModel(object):
         @return \c void
 
         """
-        self.n_hidden = self.n_lstm = self.vdim
         # auxiliary zero matrix used for padding the input
         self._subzero = TT.zeros((self.max_conv_len, self.vdim))
         # matrix of char vectors, corresponding to single word
@@ -384,6 +387,7 @@ class RNNModel(object):
         ########
         # LSTM #
         ########
+        self.n_lstm = self.n_conv2 + self.n_conv3 + self.n_conv4
         self.LSTM_W = theano.shared(value = np.concatenate([_rnd_orth_mtx(self.n_lstm) \
                                                                 for _ in xrange(4)], axis = 1), \
                                         name = "LSTM_W")
@@ -422,14 +426,10 @@ class RNNModel(object):
             @return max convolutions computed from these indices
 
             """
-            # embeddings obtained for specific indices
-            emb_i = self.EMB[a_x]
-            m_emb = a_x.shape[0]
-            m_pad = TT.max([self.max_conv_len - m_emb, 0])
-            in_len = m_emb + m_pad
+            # length of character input
+            in_len = a_x.shape[0]
             # input to convolutional layer
-            conv_in = TT.concatenate([emb_i, self._subzero[:m_pad,:]], \
-                                     0).reshape((1, 1, in_len, self.vdim))
+            conv_in = self.EMB[a_x].reshape((1, 1, in_len, self.vdim))
             # width-2 convolutions
             conv2_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV2), \
                                    (self.n_conv2, in_len - self.conv2_width + 1)).T
@@ -468,8 +468,12 @@ class RNNModel(object):
             @return 2-tuple (with the output and memory cells)
 
             """
+            # print("_lstm_step: x_", x_.eval())
+            # print("_lstm_step: o_", o_.eval())
+            # print("_lstm_step: m_", m_.eval())
             # obtain character convolutions for input indices
             iconv = self._emb2conv(x_)
+            # print("_lstm_step: iconv", iconv.eval())
             # common term for all LSTM components
             proxy = TT.dot(iconv, self.LSTM_W) + TT.dot(o_, self.LSTM_U) + \
                 self.LSTM_BIAS
@@ -486,16 +490,16 @@ class RNNModel(object):
             # return new state of memory cell and state of hidden recurrence
             return o, m
         # `scan' function
-        res, updates = theano.scan(_lstm_step,
-                                   sequences = [self.W_INDICES],
-                                   outputs_info = [TT.alloc(_floatX(0.),
-                                                            self.W_INDICES.shape[0],
-                                                            self.n_lstm),
-                                                   TT.alloc(_floatX(0.),
-                                                            self.W_INDICES.shape[0],
-                                                            self.n_lstm)],
+        res, _ = theano.scan(_lstm_step,
+                             sequences = [self.W_INDICES],
+                             outputs_info = [TT.alloc(_floatX(0.),
+                                                      self.W_INDICES.shape[0],
+                                                      self.n_lstm),
+                                             TT.alloc(_floatX(0.),
+                                                      self.W_INDICES.shape[0],
+                                                      self.n_lstm)],
                                    name = "_lstm_layers")
-        return (res, updates)
+        return res
 
     def _reset(self):
         """Reset instance variables.
