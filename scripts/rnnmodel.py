@@ -85,7 +85,9 @@ def _slice(_x, n, dim):
 
     """
     if _x.ndim == 3:
+        print("_slice: ndim = 3", file = sys.stderr)
         return _x[:, :, n * dim:(n + 1) * dim]
+    print("_slice: ndim = ", _x.ndim, file = sys.stderr)
     return _x[:, n * dim:(n + 1) * dim]
 
 def _rnd_orth_mtx(a_dim):
@@ -197,43 +199,49 @@ class RNNModel(object):
 
         # initialize LSTM layer
         lstm_out = self._init_lstm()
+        # LSTM debug function
         lstm_debug = theano.function([self.W_INDICES], lstm_out, name = "lstm_debug")
 
-        print("res =", lstm_out[-1], type(lstm_out[-1]))
-        print("res.ndim =", lstm_out[-1][-1].ndim)
         # mapping from the LSTM layer to output
         self.LSTM2Y = theano.shared(value = RND_VEC((self.n_lstm, self.n_labels)),
                                     name = "LSTM2Y")
         # output bias
-        self.Y_BIAS = theano.shared(value = RND_VEC((1, self.n_labels)),
-                                    name = "Y_BIAS")
+        self.Y_BIAS = theano.shared(value = RND_VEC((self.n_labels)), name = "Y_BIAS")
         # # output layer
-        # self.Y = TT.nnet.softmax(TT.dot(lstm_out[0], self.LSTM2Y) + self.Y_BIAS)
+        self.Y = TT.nnet.softmax(TT.dot(lstm_out[0].mean(0), self.LSTM2Y) + self.Y_BIAS)
 
         # add newly initialized weights to the parameters to be trained
         self._params += [self.LSTM2Y, self.Y_BIAS]
 
         # correct label
-        # y = TT.iscalar('y')
-        # # predicted label
-        # y_pred = TT.argmax(self.Y, axis = 1)
+        y = TT.iscalar('y')
+        # predicted label
+        y_pred = TT.argmax(self.Y, axis = 1)
+        # prediction function
+        predict_debug = theano.function([self.W_INDICES], self.Y, name = "predict")
+        predict = theano.function([self.W_INDICES], y_pred, name = "predict")
 
         # # cost gradients and updates
-        # alpha = TT.scalar("alpha")
-        # cost = -TT.log(self.Y[0,y])
-        # gradients = TT.grad(cost, self._params)
-        # updates = OrderedDict((p, p - alpha * g) for p, g in zip(self._params , gradients))
+        alpha = TT.scalar("alpha")
+        cost = -TT.log(self.Y[0, y])
+        gradients = TT.grad(cost, self._params)
+        print("self._params =", self._params, file = sys.stderr)
+        updates = OrderedDict((p, p - alpha * g) for p, g in zip(self._params , gradients))
 
-        # # define training function and let training begin
+        # define training function and let the training begin
         # train = theano.function(inputs  = [self.W_INDICES, y, alpha], \
-        #                         outputs = [cost], updates = updates)
+        #                             outputs = [cost], updates = updates)
 
         icost = None
         a_trainset = self._digitize_feats(a_trainset)
         for x_i, y_i in a_trainset:
             print("x_i =", repr(x_i), file = sys.stderr)
             print("y_i =", repr(y_i), file = sys.stderr)
-            print("lstm_debug =", repr(lstm_debug(x_i)), file = sys.stderr)
+            print("convolutions =", lstm_debug(x_i), file = sys.stderr)
+            print("predict =", predict(x_i), file = sys.stderr)
+            print("predict_debug =", predict_debug(x_i), file = sys.stderr)
+
+            # print("lstm_debug =", repr(lstm_debug(x_i)), file = sys.stderr)
             # for iword in x_i:
             #     icost = train(iword, y_i, self.alpha)
             #     print("icost =", repr(icost), file = sys.stderr)
@@ -243,18 +251,18 @@ class RNNModel(object):
             break
         sys.exit(66)
 
-        self._predict = theano.function(inputs = [x], outputs = [y_pred, score])
-        for _ in xrange(MAX_ITERS):
-            s = 0.
-            for x_i, y_i in a_trainset:
-                # print("x =", repr(x), file = sys.stderr)
-                # print("y =", repr(y), file = sys.stderr)
-                # s += train(x_i, y_i)
-                pass
-            if prev_s != s and (prev_s - s) < EPSILON:
-                break
-            prev_s = s
-            print("s =", repr(s), file = sys.stderr)
+        # self._predict = theano.function(inputs = [x], outputs = [y_pred, score])
+        # for _ in xrange(MAX_ITERS):
+        #     s = 0.
+        #     for x_i, y_i in a_trainset:
+        #         # print("x =", repr(x), file = sys.stderr)
+        #         # print("y =", repr(y), file = sys.stderr)
+        #         # s += train(x_i, y_i)
+        #         pass
+        #     if prev_s != s and (prev_s - s) < EPSILON:
+        #         break
+        #     prev_s = s
+        #     print("s =", repr(s), file = sys.stderr)
 
     def predict(self, a_seq):
         """Prediction function
@@ -326,7 +334,7 @@ class RNNModel(object):
         ilen = 0
         for iword in a_seq:
             feat_idcs = []
-            print("iword = ", repr(iword))
+            # print("iword = ", repr(iword))
             # append auxiliary items
             ilen = len(iword)
             for ichar in iword:
@@ -388,13 +396,16 @@ class RNNModel(object):
         # LSTM #
         ########
         self.n_lstm = self.n_conv2 + self.n_conv3 + self.n_conv4
+        print("n_lstm =", repr(self.n_lstm), file = sys.stderr)
         self.LSTM_W = theano.shared(value = np.concatenate([_rnd_orth_mtx(self.n_lstm) \
                                                                 for _ in xrange(4)], axis = 1), \
                                         name = "LSTM_W")
         self.LSTM_U = theano.shared(value = np.concatenate([_rnd_orth_mtx(self.n_lstm) \
                                                                 for _ in xrange(4)], axis = 1), \
                                         name = "LSTM_U")
-        self.LSTM_BIAS = theano.shared(RND_VEC((1, self.n_lstm * 4)), name = "LSTM_BIAS")
+        print("self.LSTM_U =", self.LSTM_U.eval(), file = sys.stderr)
+
+        self.LSTM_BIAS = theano.shared(RND_VEC((self.n_lstm * 4)), name = "LSTM_BIAS")
         self._params += [self.LSTM_W, self.LSTM_U, self.LSTM_BIAS]
 
     def _init_emb(self):
@@ -403,7 +414,7 @@ class RNNModel(object):
         @return \c void
 
         """
-        self.EMB = theano.shared(value = RND_VEC((self.V, self.vdim)))
+        self.EMB = theano.shared(value = RND_VEC((self.V, self.vdim)), name = "EMB")
         # obtain indices for special embeddings (BEGINNING, END, UNKNOWN)
         cnt = 0
         for ikey in AUX_VEC_KEYS:
@@ -446,8 +457,8 @@ class RNNModel(object):
             conv4_max_out = conv4_out[TT.argmax(TT.sum(conv4_out, axis = 1)),:] + \
                             self.CONV4_BIAS
             # output convolutions
-            conv_max_out = TT.nnet.relu(TT.concatenate([conv2_max_out, conv3_max_out, \
-                                                        conv4_max_out], axis = 1))
+            conv_max_out = TT.concatenate([conv2_max_out, conv3_max_out, \
+                                               conv4_max_out], axis = 1)
             return conv_max_out
         self._emb2conv = _emb2conv
 
@@ -468,36 +479,28 @@ class RNNModel(object):
             @return 2-tuple (with the output and memory cells)
 
             """
-            # print("_lstm_step: x_", x_.eval())
-            # print("_lstm_step: o_", o_.eval())
-            # print("_lstm_step: m_", m_.eval())
             # obtain character convolutions for input indices
-            iconv = self._emb2conv(x_)
-            # print("_lstm_step: iconv", iconv.eval())
-            # common term for all LSTM components
-            proxy = TT.dot(iconv, self.LSTM_W) + TT.dot(o_, self.LSTM_U) + \
-                self.LSTM_BIAS
+            iconv = self._emb2conv(x_)[0,:]
+            # compute common term for all LSTM components
+            proxy = TT.nnet.sigmoid(TT.dot(iconv, self.LSTM_W) + TT.dot(o_, self.LSTM_U) + \
+                                        self.LSTM_BIAS)
             # input
-            i = TT.nnet.sigmoid(_slice(proxy, 0, self.n_lstm))
+            i = proxy[:self.n_lstm]
             # forget
-            f = TT.nnet.sigmoid(_slice(proxy, 1, self.n_lstm))
+            f = proxy[self.n_lstm:2*self.n_lstm]
             # output
-            o = TT.nnet.sigmoid(_slice(proxy, 2, self.n_lstm))
+            o = proxy[2*self.n_lstm:3*self.n_lstm]
             # new state of memory cell (input * current + forget * previous)
-            m = i * TT.tanh(_slice(proxy, 3, self.n_lstm)) + f * m_
-            # new state of hidden recurrence
+            m = i * TT.tanh(proxy[3*self.n_lstm:]) + f * m_
+            # new outout state
             o = o * TT.tanh(m)
-            # return new state of memory cell and state of hidden recurrence
+            # return new output and memory state
             return o, m
         # `scan' function
         res, _ = theano.scan(_lstm_step,
                              sequences = [self.W_INDICES],
-                             outputs_info = [TT.alloc(_floatX(0.),
-                                                      self.W_INDICES.shape[0],
-                                                      self.n_lstm),
-                                             TT.alloc(_floatX(0.),
-                                                      self.W_INDICES.shape[0],
-                                                      self.n_lstm)],
+                             outputs_info = [TT.alloc(_floatX(0.), self.n_lstm),
+                                             TT.alloc(_floatX(0.), self.n_lstm)],
                                    name = "_lstm_layers")
         return res
 
