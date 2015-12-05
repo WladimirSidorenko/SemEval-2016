@@ -34,12 +34,12 @@ INF = float("inf")
 # default training parameters
 ALPHA = 5e-3
 EPSILON = 1e-5
-MAX_ITERS = 50
+MAX_ITERS = 2048
 ADADELTA = 0
 SGD = 1
 
 # default dimension of input vectors
-VEC_DIM = 4                     # 32
+VEC_DIM = 32
 # default context window
 # CW = 1
 
@@ -102,6 +102,55 @@ def _rnd_orth_mtx(a_dim):
     u, _, _ = np.linalg.svd(W)
     return u.astype(config.floatX)
 
+
+def adadelta(tparams, grads, x, y, cost):
+    """An adaptive learning rate optimizer
+
+    @param tpramas - model parameters
+    @param grads - gradients of cost w.r.t to parameres
+    @param x - model inputs
+    @param y - targets
+    @param cost - objective function to minimize
+
+    Notes
+    -----
+    For more information, see [ADADELTA]_.
+
+    .. [ADADELTA] Matthew D. Zeiler, *ADADELTA: An Adaptive Learning
+       Rate Method*, arXiv:1212.5701.
+    """
+
+    zipped_grads = [theano.shared(p.get_value() * _floatX(0.), \
+                                      name='%s_grad' % str(p)) \
+                        for p in tparams]
+    running_up2 = [theano.shared(p.get_value() * _floatX(0.),
+                                 name='%s_rup2' % str(p))
+                   for p in tparams]
+    running_grads2 = [theano.shared(p.get_value() * _floatX(0.),
+                                    name='%s_rgrad2' % str(p))
+                      for p in tparams]
+
+    zgup = [(zg, g) for zg, g in zip(zipped_grads, grads)]
+    rg2up = [(rg2, 0.95 * rg2 + 0.05 * (g ** 2))
+             for rg2, g in zip(running_grads2, grads)]
+
+    f_grad_shared = theano.function([x, y], cost, updates = zgup + rg2up,
+                                    name = "adadelta_f_grad_shared")
+
+    updir = [-TT.sqrt(ru2 + 1e-6) / TT.sqrt(rg2 + 1e-6) * zg
+             for zg, ru2, rg2 in zip(zipped_grads,
+                                     running_up2,
+                                     running_grads2)]
+    ru2up = [(ru2, 0.95 * ru2 + 0.05 * (ud ** 2))
+             for ru2, ud in zip(running_up2, updir)]
+    param_up = [(p, p + ud) for p, ud in zip(tparams, updir)]
+
+    f_update = theano.function([], [], updates = ru2up + param_up,
+                               on_unused_input = "ignore",
+                               name = "adadelta_f_update")
+
+    return f_grad_shared, f_update
+
 ##################################################################
 # Class
 class RNNModel(object):
@@ -140,17 +189,14 @@ class RNNModel(object):
         self.int2lbl = dict()
         self.int2coeff = dict()
         self.feat2idx = dict()
-        self.alpha = ALPHA
-        self.optimizer = ADADELTA
+        # self.alpha = ALPHA
+        # self.optimizer = ADADELTA
         self.use_dropout = False
         # NN parameters to be learned
         self._params = []
-
-        # custom function for computing convolutions from indices
-        self._emb2conv = None
-        # the parameters below will be initialized during training
         # private prediction function
         self._predict = None
+        # the parameters below will be initialized during training
         # matrix of items' embeddings (either words or characters) that serve as input to RNN
         self.EMB = self.EMB_I = self.CONV_IN = None
         # output of convolutional layers
@@ -158,10 +204,9 @@ class RNNModel(object):
         # max-sample output of convolutional layers
         self.CONV2_MAX_OUT = self.CONV3_MAX_OUT = self.CONV4_MAX_OUT = self.CONV_MAX_OUT = None
         # custom recurrence function (hiding LSTM)
-        self._recurrence = None
+        # self._recurrence = None
         # map from hidden layer to output and bias for the output layer
         self.LSTM2Y = self.Y_BIAS = self.Y = None
-
         # the remianing parameters will be initialized immediately
         self._init_params()
 
@@ -194,9 +239,6 @@ class RNNModel(object):
         # initialize embedding matrix for features
         self._init_emb()
 
-        # initialize embedding 2 convolutions function
-        self._init_conv()
-
         # initialize LSTM layer
         lstm_out = self._init_lstm()
         # LSTM debug function
@@ -215,54 +257,39 @@ class RNNModel(object):
 
         # correct label
         y = TT.iscalar('y')
-        # predicted label
         y_pred = TT.argmax(self.Y, axis = 1)
         # prediction function
-        predict_debug = theano.function([self.W_INDICES], self.Y, name = "predict")
-        predict = theano.function([self.W_INDICES], y_pred, name = "predict")
+        self._predict = theano.function([self.W_INDICES], \
+                                            [y_pred, self.Y[0, y_pred]], \
+                                            name = "predict")
 
-        # # cost gradients and updates
-        alpha = TT.scalar("alpha")
+        # cost gradients and updates
         cost = -TT.log(self.Y[0, y])
-        gradients = TT.grad(cost, self._params)
-        print("self._params =", self._params, file = sys.stderr)
-        updates = OrderedDict((p, p - alpha * g) for p, g in zip(self._params , gradients))
+        gradients = TT.grad(cost, wrt = self._params)
+        f_grad = theano.function([self.W_INDICES, y], gradients, name = "f_grad")
 
         # define training function and let the training begin
+        f_grad_shared, f_update = adadelta(self._params, gradients, \
+                                           self.W_INDICES, y, cost)
+
+        # print("self._params =", self._params, file = sys.stderr)
+        # alpha = TT.scalar("alpha")
+        # updates = OrderedDict((p, p - alpha * g) for p, g in zip(self._params , gradients))
         # train = theano.function(inputs  = [self.W_INDICES, y, alpha], \
         #                             outputs = [cost], updates = updates)
 
-        icost = None
+        prev_cost = icost = best_cost = INF
         a_trainset = self._digitize_feats(a_trainset)
-        for x_i, y_i in a_trainset:
-            print("x_i =", repr(x_i), file = sys.stderr)
-            print("y_i =", repr(y_i), file = sys.stderr)
-            print("convolutions =", lstm_debug(x_i), file = sys.stderr)
-            print("predict =", predict(x_i), file = sys.stderr)
-            print("predict_debug =", predict_debug(x_i), file = sys.stderr)
-
-            # print("lstm_debug =", repr(lstm_debug(x_i)), file = sys.stderr)
-            # for iword in x_i:
-            #     icost = train(iword, y_i, self.alpha)
-            #     print("icost =", repr(icost), file = sys.stderr)
-            #     # print("f_conv3 =", repr(self.f_conv3(iword)), file = sys.stderr)
-            #     # print("f_conv4 =", repr(self.f_conv4(iword)), file = sys.stderr)
-            #     break
-            break
-        sys.exit(66)
-
-        # self._predict = theano.function(inputs = [x], outputs = [y_pred, score])
-        # for _ in xrange(MAX_ITERS):
-        #     s = 0.
-        #     for x_i, y_i in a_trainset:
-        #         # print("x =", repr(x), file = sys.stderr)
-        #         # print("y =", repr(y), file = sys.stderr)
-        #         # s += train(x_i, y_i)
-        #         pass
-        #     if prev_s != s and (prev_s - s) < EPSILON:
-        #         break
-        #     prev_s = s
-        #     print("s =", repr(s), file = sys.stderr)
+        for i in xrange(MAX_ITERS):
+            icost = 0.
+            for x_i, y_i in a_trainset:
+                icost += f_grad_shared(x_i, y_i)
+                f_update()
+            print("Iteration #{:d}: cost = {:.10f}".format(i, icost), file = sys.stderr)
+            if prev_cost != INF and 0 < (prev_cost - icost) < EPSILON:
+                break
+            prev_cost = icost
+        return icost
 
     def predict(self, a_seq):
         """Prediction function
@@ -272,6 +299,9 @@ class RNNModel(object):
         @return 2-tuple with predicted label and its assigned score
 
         """
+        assert self._predict is not None, "Trying to predict using an untrained model."
+        # print("a_seq =", repr(a_seq), file = sys.stderr)
+        # print("self._feat2idcs(a_seq) =", self._feat2idcs(a_seq), file = sys.stderr)
         y, score = self._predict(self._feat2idcs(a_seq))
         return (self.int2lbl[int(y)], score)
 
@@ -310,7 +340,6 @@ class RNNModel(object):
             # instance
             ret.append((np.asarray(self._feat2idcs(iseq, a_add = True), \
                                    dtype = "int32"), dlabel))
-            break
         return ret
 
     def _feat2idcs(self, a_seq, a_add = False):
@@ -396,14 +425,12 @@ class RNNModel(object):
         # LSTM #
         ########
         self.n_lstm = self.n_conv2 + self.n_conv3 + self.n_conv4
-        print("n_lstm =", repr(self.n_lstm), file = sys.stderr)
         self.LSTM_W = theano.shared(value = np.concatenate([_rnd_orth_mtx(self.n_lstm) \
                                                                 for _ in xrange(4)], axis = 1), \
                                         name = "LSTM_W")
         self.LSTM_U = theano.shared(value = np.concatenate([_rnd_orth_mtx(self.n_lstm) \
                                                                 for _ in xrange(4)], axis = 1), \
                                         name = "LSTM_U")
-        print("self.LSTM_U =", self.LSTM_U.eval(), file = sys.stderr)
 
         self.LSTM_BIAS = theano.shared(RND_VEC((self.n_lstm * 4)), name = "LSTM_BIAS")
         self._params += [self.LSTM_W, self.LSTM_U, self.LSTM_BIAS]
@@ -423,44 +450,37 @@ class RNNModel(object):
         # add embeddings to the parameters to be trained
         self._params.append(self.EMB)
 
-    def _init_conv(self):
-        """Initialize function for computing convolutions from indices
+    def _emb2conv(self, a_x):
+        """Compute convolutions from indices
 
-        @return \c void
+        @param a_x - indices of embeddings
+
+        @return max convolutions computed from these indices
 
         """
-        def _emb2conv(a_x):
-            """Private function for computing convolutions from indices
-
-            @param a_x - indices of embeddings
-
-            @return max convolutions computed from these indices
-
-            """
-            # length of character input
-            in_len = a_x.shape[0]
-            # input to convolutional layer
-            conv_in = self.EMB[a_x].reshape((1, 1, in_len, self.vdim))
-            # width-2 convolutions
-            conv2_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV2), \
+        # length of character input
+        in_len = a_x.shape[0]
+        # input to convolutional layer
+        conv_in = self.EMB[a_x].reshape((1, 1, in_len, self.vdim))
+        # width-2 convolutions
+        conv2_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV2), \
                                    (self.n_conv2, in_len - self.conv2_width + 1)).T
-            conv2_max_out = conv2_out[TT.argmax(TT.sum(conv2_out, axis = 1)),:] + \
-                            self.CONV2_BIAS
-            # width-3 convolutions
-            conv3_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV3), \
+        conv2_max_out = conv2_out[TT.argmax(TT.sum(conv2_out, axis = 1)),:] + \
+            self.CONV2_BIAS
+        # width-3 convolutions
+        conv3_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV3), \
                                    (self.n_conv3, in_len - self.conv3_width + 1)).T
-            conv3_max_out = conv3_out[TT.argmax(TT.sum(conv3_out, axis = 1)),:] + \
-                            self.CONV3_BIAS
-            # width-4 convolutions
-            conv4_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV4), \
+        conv3_max_out = conv3_out[TT.argmax(TT.sum(conv3_out, axis = 1)),:] + \
+            self.CONV3_BIAS
+        # width-4 convolutions
+        conv4_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV4), \
                                    (self.n_conv4, in_len - self.conv4_width + 1)).T
-            conv4_max_out = conv4_out[TT.argmax(TT.sum(conv4_out, axis = 1)),:] + \
-                            self.CONV4_BIAS
-            # output convolutions
-            conv_max_out = TT.concatenate([conv2_max_out, conv3_max_out, \
-                                               conv4_max_out], axis = 1)
-            return conv_max_out
-        self._emb2conv = _emb2conv
+        conv4_max_out = conv4_out[TT.argmax(TT.sum(conv4_out, axis = 1)),:] + \
+            self.CONV4_BIAS
+        # output convolutions
+        conv_max_out = TT.concatenate([conv2_max_out, conv3_max_out, \
+                                           conv4_max_out], axis = 1)
+        return TT.dot(conv_max_out[0,:], self.LSTM_W  + self.LSTM_BIAS)
 
     def _init_lstm(self):
         """Initialize parameters of LSTM layer.
@@ -480,10 +500,9 @@ class RNNModel(object):
 
             """
             # obtain character convolutions for input indices
-            iconv = self._emb2conv(x_)[0,:]
+            iconv = self._emb2conv(x_)
             # compute common term for all LSTM components
-            proxy = TT.nnet.sigmoid(TT.dot(iconv, self.LSTM_W) + TT.dot(o_, self.LSTM_U) + \
-                                        self.LSTM_BIAS)
+            proxy = TT.nnet.sigmoid(iconv + TT.dot(o_, self.LSTM_U))
             # input
             i = proxy[:self.n_lstm]
             # forget
@@ -511,68 +530,3 @@ class RNNModel(object):
 
         """
         self._predict = None
-
-##################################################################
-# Auxiliary Debug Methods and Variables
-
-# # auxiliary debug variables and methods
-# CONV2_OUT = TT.nnet.conv.conv2d(self.CONV_IN, self.CONV2)
-# CONV2_OUT_RESHAPE = TT.reshape(CONV2_OUT, (self.n_conv2, self.IN_LEN - self.conv2_width + 1)).T
-# CONV2_MAX_OUT = CONV2_OUT_RESHAPE[TT.argmax(TT.sum(self.CONV2_OUT, axis = 1)),:]
-# CONV2_MAX_OUT_BIAS = CONV2_MAX_OUT + self.CONV2_BIAS
-
-# # get_ilen = theano.function([self.INDICES], self.IN_LEN)
-# f_conv2 = theano.function([self.INDICES], self.CONV2_MAX_OUT)
-# f_conv3 = theano.function([self.INDICES], self.CONV3_MAX_OUT)
-# f_conv4 = theano.function([self.INDICES], self.CONV4_MAX_OUT)
-# get_emb = theano.function([self.INDICES], self.EMB_I)
-# get_conv_in = theano.function([self.INDICES], self.CONV_IN)
-# get_conv_out = theano.function([self.INDICES], CONV2_OUT)
-# get_conv_out_reshape = theano.function([self.INDICES], CONV2_OUT_RESHAPE)
-# get_conv_out_max = theano.function([self.INDICES], CONV2_MAX_OUT)
-# get_conv_out_max_bias = theano.function([self.INDICES], CONV2_MAX_OUT_BIAS)
-# get_conv_out_total = theano.function([self.INDICES], self.CONV_MAX_OUT)
-# get_H = theano.function([self.INDICES], self.H)
-# get_Y = theano.function([self.INDICES], self.Y)
-# get_y_pred = theano.function([self.INDICES], y_pred)
-# get_cost = theano.function([self.INDICES, y], cost)
-
-# # define custom recursive function
-# def _recurrence(x_t):
-#     # embedding layer
-#     emb_t = self.EMB[x_t].reshape([1, CW * self.vdim], ndim = 2)
-#     # embedding layer propagated via tensor
-#     # in_t = TT.dot(TT.tensordot(emb_t, self.E2H, [[1], [1]]), emb_t.T)
-#     # in_t = in_t.reshape([1, self.vdim], ndim = 2)
-#     # print("in_t.shape", repr(in_t.shape), file = sys.stderr)
-#     # 0-th hidden layer
-#     h0_t = TT.nnet.relu(TT.dot(emb_t, self.E2H) + self.H0BV, 0.5)
-#     h1_t = TT.nnet.sigmoid(TT.dot(h0_t, self.H02H1) + self.H1BV)
-#     h2_t = TT.nnet.relu(TT.dot(h1_t, self.H12H2) + self.H2BV)
-#     # print("h_t.shape", repr(h_t.shape), file = sys.stderr)
-#     s_t = TT.nnet.softmax(TT.dot(h2_t, self.H2Y) + self.YBV)
-#     return [s_t]
-
-# # auxiliary variables used for training
-# X = TT.lmatrix('X')
-# # y = TT.vector('y')
-# y = TT.iscalar('y')
-# s, _ = theano.scan(fn = _recurrence, sequences = X, \
-#                    n_steps = X.shape[0])
-
-# p_y_given_x_lastword = s[-1,0,:]
-# y_pred = TT.argmax(p_y_given_x_lastword, axis = 0)
-# score = p_y_given_x_lastword[y_pred]
-# nll = -TT.log(p_y_given_x_lastword)[y]
-# # nll =  TT.sum(TT.pow(y - TT.log(p_y_given_x_lastword), 2))
-# gradients = TT.grad(nll, self._params)
-# updates = OrderedDict((p, p - self.alpha * g) for p, g in \
-#                           zip(self._params , gradients))
-# # compile training function
-# train = theano.function(inputs = [x, y], outputs = nll, updates = updates)
-# convert symbolic features to embedding indices
-# a_trainset = self._digitize_feats(a_trainset)
-# sys.exit(66)
-# perform training
-# prev_s = s = INF
-# set prediction function

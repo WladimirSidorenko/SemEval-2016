@@ -266,11 +266,11 @@ def adadelta(lr, tparams, grads, x, mask, y, cost):
     """
 
     zipped_grads = [theano.shared(p.get_value() * numpy_floatX(0.),
-                                  name='%s_grad' % k)
-                    for k, p in tparams.iteritems()]
+                                  name='%s_grad' % str(p))
+                    for p in tparams]
     running_up2 = [theano.shared(p.get_value() * numpy_floatX(0.),
-                                 name='%s_rup2' % k)
-                   for k, p in tparams.iteritems()]
+                                 name='%s_rup2' % str(p))
+                   for p in tparams.iteritems()]
     running_grads2 = [theano.shared(p.get_value() * numpy_floatX(0.),
                                     name='%s_rgrad2' % k)
                       for k, p in tparams.iteritems()]
