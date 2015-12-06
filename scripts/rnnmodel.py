@@ -22,8 +22,8 @@ import numpy as np
 import sys
 import theano
 
-from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
-from theano import config, printing, tensor as TT
+# from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
+from theano import config, tensor as TT
 from collections import OrderedDict
 from itertools import chain
 
@@ -34,7 +34,7 @@ INF = float("inf")
 # default training parameters
 ALPHA = 5e-3
 EPSILON = 1e-5
-MAX_ITERS = 2048
+MAX_ITERS = 50
 ADADELTA = 0
 SGD = 1
 
@@ -61,6 +61,10 @@ UNK = "___%UNK%___"
 BEG = "___%BEG%___"
 END = "___%END%___"
 AUX_VEC_KEYS = [EMP, UNK, BEG, END]
+
+# theano options
+config.allow_gc = True
+config.scan.allow_gc = True
 
 ##################################################################
 # Methods
@@ -249,8 +253,8 @@ class RNNModel(object):
                                     name = "LSTM2Y")
         # output bias
         self.Y_BIAS = theano.shared(value = RND_VEC((self.n_labels)), name = "Y_BIAS")
-        # # output layer
-        self.Y = TT.nnet.softmax(TT.dot(lstm_out[0].mean(0), self.LSTM2Y) + self.Y_BIAS)
+        # output layer
+        self.Y = TT.nnet.softmax(TT.dot(lstm_out[-1], self.LSTM2Y) + self.Y_BIAS)
 
         # add newly initialized weights to the parameters to be trained
         self._params += [self.LSTM2Y, self.Y_BIAS]
@@ -276,13 +280,13 @@ class RNNModel(object):
         # alpha = TT.scalar("alpha")
         # updates = OrderedDict((p, p - alpha * g) for p, g in zip(self._params , gradients))
         # train = theano.function(inputs  = [self.W_INDICES, y, alpha], \
-        #                             outputs = [cost], updates = updates)
-
+        #                             outputs = cost, updates = updates)
         prev_cost = icost = best_cost = INF
         a_trainset = self._digitize_feats(a_trainset)
         for i in xrange(MAX_ITERS):
             icost = 0.
             for x_i, y_i in a_trainset:
+                # icost += train(x_i, y_i, ALPHA)
                 icost += f_grad_shared(x_i, y_i)
                 f_update()
             print("Iteration #{:d}: cost = {:.10f}".format(i, icost), file = sys.stderr)
@@ -401,19 +405,19 @@ class RNNModel(object):
         # CONVOLUTIONS #
         ################
         # three convolutional filters for strides of width 2
-        self.n_conv2 = 3 # number of filters
+        self.n_conv2 = 6 # number of filters
         self.conv2_width = 2 # width of stride
         self.CONV2 = theano.shared(value = RND_VEC((self.n_conv2, 1, self.conv2_width, self.vdim)), \
                                        name = "CONV2")
         self.CONV2_BIAS = theano.shared(value = RND_VEC((1, self.n_conv2)), name = "CONV2_BIAS")
         # four convolutional filters for strides of width 3
-        self.n_conv3 = 4 # number of filters
+        self.n_conv3 = 8 # number of filters
         self.conv3_width = 3 # width of stride
         self.CONV3 = theano.shared(value = RND_VEC((self.n_conv3, 1, self.conv3_width, self.vdim)), \
                                        name = "CONV3")
         self.CONV3_BIAS = theano.shared(value = RND_VEC((1, self.n_conv3)), name = "CONV3_BIAS")
         # five convolutional filters for strides of width 4
-        self.n_conv4 = 5 # number of filters
+        self.n_conv4 = 10 # number of filters
         self.conv4_width = 4 # width of stride
         self.CONV4 = theano.shared(value = RND_VEC((self.n_conv4, 1, self.conv4_width, self.vdim)), \
                                        name = "CONV4")
@@ -518,10 +522,10 @@ class RNNModel(object):
         # `scan' function
         res, _ = theano.scan(_lstm_step,
                              sequences = [self.W_INDICES],
-                             outputs_info = [TT.alloc(_floatX(0.), self.n_lstm),
-                                             TT.alloc(_floatX(0.), self.n_lstm)],
+                             outputs_info = [np.zeros(self.n_lstm),
+                                             np.zeros(self.n_lstm)],
                                    name = "_lstm_layers")
-        return res
+        return res[0]
 
     def _reset(self):
         """Reset instance variables.
