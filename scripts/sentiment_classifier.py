@@ -20,6 +20,8 @@ SentimentClassifier - classifier class for predicting sentiments
 from __future__ import unicode_literals, print_function
 
 from rnnmodel import RNNModel
+# cPickle can't serialize function objects, e.g. rnn._predict()
+# from cloud.serialization.cloudpickle import dump, load
 from cPickle import dump, load
 
 import os
@@ -83,6 +85,7 @@ class SentimentClassifier(object):
         # dump trained model to disc
         # sys.setrecursionlimit(1500) # model might be large to save
         with open(a_path, "wb") as ofile:
+            self.model._predict = None
             dump(self.model, ofile)
 
     def _predict(self, a_inst):

@@ -34,7 +34,7 @@ INF = float("inf")
 # default training parameters
 ALPHA = 5e-3
 EPSILON = 1e-5
-MAX_ITERS = 50
+MAX_ITERS = 2 # 500
 ADADELTA = 0
 SGD = 1
 
@@ -53,7 +53,7 @@ SIGMA = 1.5
 
 # custom function for generating random vectors
 np.random.seed()
-RND_VEC = lambda a_dim = VEC_DIM: np.random.uniform(UMIN, UMAX, a_dim)
+RND_VEC = lambda a_dim = VEC_DIM: np.random.uniform(UMIN, UMAX, a_dim).astype(config.floatX)
 
 # symbolic codes for auxiliary vectors
 EMP = "___%EMP%___"
@@ -66,6 +66,12 @@ AUX_VEC_KEYS = [EMP, UNK, BEG, END]
 config.allow_gc = True
 config.scan.allow_gc = True
 
+# theano profiling
+# specify on the command line: THEANO_FLAGS=device=cpu,optimizer_excluding=fusion:inplace
+# config.profile = True
+# config.profile_memory = True
+# config.profile_optimizer = True
+
 ##################################################################
 # Methods
 def _floatX(data):
@@ -77,22 +83,6 @@ def _floatX(data):
 
     """
     return np.asarray(data, dtype = config.floatX)
-
-def _slice(_x, n, dim):
-    """Return slice of input tensor from the last two dimensions.
-
-    @param _x - input tensor
-    @param n - input tensor
-    @param dim - input tensor
-
-    @return tensor of size `n * dim x (n + 1) * dim`
-
-    """
-    if _x.ndim == 3:
-        print("_slice: ndim = 3", file = sys.stderr)
-        return _x[:, :, n * dim:(n + 1) * dim]
-    print("_slice: ndim = ", _x.ndim, file = sys.stderr)
-    return _x[:, n * dim:(n + 1) * dim]
 
 def _rnd_orth_mtx(a_dim):
     """Return orthogonal matrix with random weights.
@@ -124,27 +114,33 @@ def adadelta(tparams, grads, x, y, cost):
        Rate Method*, arXiv:1212.5701.
     """
 
-    zipped_grads = [theano.shared(p.get_value() * _floatX(0.), \
-                                      name='%s_grad' % str(p)) \
-                        for p in tparams]
-    running_up2 = [theano.shared(p.get_value() * _floatX(0.),
-                                 name='%s_rup2' % str(p))
-                   for p in tparams]
-    running_grads2 = [theano.shared(p.get_value() * _floatX(0.),
-                                    name='%s_rgrad2' % str(p))
+    zipped_grads = [theano.shared(value = np.asarray(p.get_value() * 0., config.floatX), \
+                                  name = '%s_grad' % str(p)) for p in tparams]
+    running_up2 = [theano.shared(np.asarray(p.get_value() * 0., config.floatX),
+                                 name='%s_rup2' % str(p)) for p in tparams]
+    running_grads2 = [theano.shared(value = np.asarray(p.get_value() * 0., config.floatX),
+                                    name = '%s_rgrad2' % str(p)) \
                       for p in tparams]
 
     zgup = [(zg, g) for zg, g in zip(zipped_grads, grads)]
+    # rg2up = [(rg2, rg2 + g)
+    #          for rg2, g in zip(running_grads2, grads)]
     rg2up = [(rg2, 0.95 * rg2 + 0.05 * (g ** 2))
              for rg2, g in zip(running_grads2, grads)]
 
     f_grad_shared = theano.function([x, y], cost, updates = zgup + rg2up,
                                     name = "adadelta_f_grad_shared")
 
+    # updir = [-TT.sqrt(ru2) / TT.sqrt(rg2) * zg
+    #          for zg, ru2, rg2 in zip(zipped_grads,
+    #                                  running_up2,
+    #                                  running_grads2)]
     updir = [-TT.sqrt(ru2 + 1e-6) / TT.sqrt(rg2 + 1e-6) * zg
              for zg, ru2, rg2 in zip(zipped_grads,
                                      running_up2,
                                      running_grads2)]
+    # ru2up = [(ru2, ru2 + ud)
+    #          for ru2, ud in zip(running_up2, updir)]
     ru2up = [(ru2, 0.95 * ru2 + 0.05 * (ud ** 2))
              for ru2, ud in zip(running_up2, updir)]
     param_up = [(p, p + ud) for p, ud in zip(tparams, updir)]
@@ -245,8 +241,8 @@ class RNNModel(object):
 
         # initialize LSTM layer
         lstm_out = self._init_lstm()
-        # LSTM debug function
-        lstm_debug = theano.function([self.W_INDICES], lstm_out, name = "lstm_debug")
+        # # LSTM debug function
+        # lstm_debug = theano.function([self.W_INDICES], lstm_out, name = "lstm_debug")
 
         # mapping from the LSTM layer to output
         self.LSTM2Y = theano.shared(value = RND_VEC((self.n_lstm, self.n_labels)),
@@ -260,12 +256,7 @@ class RNNModel(object):
         self._params += [self.LSTM2Y, self.Y_BIAS]
 
         # correct label
-        y = TT.iscalar('y')
-        y_pred = TT.argmax(self.Y, axis = 1)
-        # prediction function
-        self._predict = theano.function([self.W_INDICES], \
-                                            [y_pred, self.Y[0, y_pred]], \
-                                            name = "predict")
+        y = TT.scalar('y', dtype = "int32")
 
         # cost gradients and updates
         cost = -TT.log(self.Y[0, y])
@@ -281,11 +272,53 @@ class RNNModel(object):
         # updates = OrderedDict((p, p - alpha * g) for p, g in zip(self._params , gradients))
         # train = theano.function(inputs  = [self.W_INDICES, y, alpha], \
         #                             outputs = cost, updates = updates)
+
         prev_cost = icost = best_cost = INF
-        a_trainset = self._digitize_feats(a_trainset)
+        a_trainset = [self._digitize_feats(a_trainset)[0]]
+
+        # debug functions
+        in_len = self.CHAR_INDICES.shape[0]
+        # input to convolutional layer
+        conv_in = self.EMB[self.CHAR_INDICES].reshape((1, 1, in_len, self.vdim))
+        conv2_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV2), \
+                                   (self.n_conv2, in_len - self.conv2_width + 1)).T
+        conv2_max_out = conv2_out[TT.argmax(TT.sum(conv2_out, axis = 1)),:] + \
+            self.CONV2_BIAS
+        # width-3 convolutions
+        conv3_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV3), \
+                                   (self.n_conv3, in_len - self.conv3_width + 1)).T
+        conv3_max_out = conv3_out[TT.argmax(TT.sum(conv3_out, axis = 1)),:] + \
+            self.CONV3_BIAS
+        # width-4 convolutions
+        conv4_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV4), \
+                                   (self.n_conv4, in_len - self.conv4_width + 1)).T
+        conv4_max_out = conv4_out[TT.argmax(TT.sum(conv4_out, axis = 1)),:] + \
+            self.CONV4_BIAS
+        # output convolutions
+        conv_max_out = TT.concatenate([conv2_max_out, conv3_max_out, \
+                                           conv4_max_out], axis = 1)
+        emb2conv = theano.function([self.CHAR_INDICES], conv_in, name = "emb2conv")
+        emb2conv2_out = theano.function([self.CHAR_INDICES], conv2_out, name = "emb2conv2_out")
+        emb2conv2_max_out = theano.function([self.CHAR_INDICES], conv2_max_out, name = "emb2conv2_max_out")
+        emb2conv3_out = theano.function([self.CHAR_INDICES], conv3_out, name = "emb2conv3_out")
+        emb2conv3_max_out = theano.function([self.CHAR_INDICES], conv3_max_out, name = "emb2conv3_max_out")
+        emb2conv4_out = theano.function([self.CHAR_INDICES], conv4_out, name = "emb2conv4_out")
+        emb2conv4_max_out = theano.function([self.CHAR_INDICES], conv4_max_out, name = "emb2conv4_max_out")
+        emb2conv_max_out = theano.function([self.CHAR_INDICES], conv_max_out, name = "emb2conv4_max_out")
+
+        print("self.CONV2 = ", repr(self.CONV2.get_value()))
+        print("self.CONV2_BIAS = ", repr(self.CONV2_BIAS.get_value()))
+        print("self.CONV3 = ", repr(self.CONV3.get_value()))
+        print("self.CONV2_BIAS = ", repr(self.CONV3_BIAS.get_value()))
+        print("self.CONV4 = ", repr(self.CONV4.get_value()))
+        print("self.CONV2_BIAS = ", repr(self.CONV4_BIAS.get_value()))
         for i in xrange(MAX_ITERS):
             icost = 0.
             for x_i, y_i in a_trainset:
+                x_i = x_i[:3]
+                print("x_i = ", repr(x_i))
+                print("y_i = ", repr(y_i))
+                sys.exit(66)
                 # icost += train(x_i, y_i, ALPHA)
                 icost += f_grad_shared(x_i, y_i)
                 f_update()
@@ -303,9 +336,12 @@ class RNNModel(object):
         @return 2-tuple with predicted label and its assigned score
 
         """
-        assert self._predict is not None, "Trying to predict using an untrained model."
-        # print("a_seq =", repr(a_seq), file = sys.stderr)
-        # print("self._feat2idcs(a_seq) =", self._feat2idcs(a_seq), file = sys.stderr)
+        if self._predict is None:
+            y_pred = TT.argmax(self.Y, axis = 1)
+            # prediction function
+            self._predict = theano.function([self.W_INDICES], \
+                                            [y_pred, self.Y[0, y_pred]], \
+                                            name = "predict")
         y, score = self._predict(self._feat2idcs(a_seq))
         return (self.int2lbl[int(y)], score)
 
@@ -405,19 +441,19 @@ class RNNModel(object):
         # CONVOLUTIONS #
         ################
         # three convolutional filters for strides of width 2
-        self.n_conv2 = 6 # number of filters
+        self.n_conv2 = 12 # number of filters
         self.conv2_width = 2 # width of stride
         self.CONV2 = theano.shared(value = RND_VEC((self.n_conv2, 1, self.conv2_width, self.vdim)), \
                                        name = "CONV2")
         self.CONV2_BIAS = theano.shared(value = RND_VEC((1, self.n_conv2)), name = "CONV2_BIAS")
         # four convolutional filters for strides of width 3
-        self.n_conv3 = 8 # number of filters
+        self.n_conv3 = 16 # number of filters
         self.conv3_width = 3 # width of stride
         self.CONV3 = theano.shared(value = RND_VEC((self.n_conv3, 1, self.conv3_width, self.vdim)), \
                                        name = "CONV3")
         self.CONV3_BIAS = theano.shared(value = RND_VEC((1, self.n_conv3)), name = "CONV3_BIAS")
         # five convolutional filters for strides of width 4
-        self.n_conv4 = 10 # number of filters
+        self.n_conv4 = 20 # number of filters
         self.conv4_width = 4 # width of stride
         self.CONV4 = theano.shared(value = RND_VEC((self.n_conv4, 1, self.conv4_width, self.vdim)), \
                                        name = "CONV4")
@@ -431,10 +467,10 @@ class RNNModel(object):
         self.n_lstm = self.n_conv2 + self.n_conv3 + self.n_conv4
         self.LSTM_W = theano.shared(value = np.concatenate([_rnd_orth_mtx(self.n_lstm) \
                                                                 for _ in xrange(4)], axis = 1), \
-                                        name = "LSTM_W")
+                                    name = "LSTM_W")
         self.LSTM_U = theano.shared(value = np.concatenate([_rnd_orth_mtx(self.n_lstm) \
-                                                                for _ in xrange(4)], axis = 1), \
-                                        name = "LSTM_U")
+                                                            for _ in xrange(4)], axis = 1), \
+                                    name = "LSTM_U")
 
         self.LSTM_BIAS = theano.shared(RND_VEC((self.n_lstm * 4)), name = "LSTM_BIAS")
         self._params += [self.LSTM_W, self.LSTM_U, self.LSTM_BIAS]
@@ -522,8 +558,8 @@ class RNNModel(object):
         # `scan' function
         res, _ = theano.scan(_lstm_step,
                              sequences = [self.W_INDICES],
-                             outputs_info = [np.zeros(self.n_lstm),
-                                             np.zeros(self.n_lstm)],
+                             outputs_info = [np.zeros(self.n_lstm).astype(config.floatX),
+                                             np.zeros(self.n_lstm).astype(config.floatX)],
                                    name = "_lstm_layers")
         return res[0]
 
