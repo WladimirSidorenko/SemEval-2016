@@ -74,6 +74,8 @@ tweets according to their sentiment polarity""")
     subparsers = argparser.add_subparsers(help="type of operation to perform", dest = "mode")
     # training options
     tr_parser = subparsers.add_parser(TRAIN, help = "train the model")
+    test_parser.add_argument("--scikit", help = "use supervised scikit classifier istead of deep",
+                             action = "store_true")
     _add_cmn_options(tr_parser)
     # testing options
     test_parser = subparsers.add_parser(TEST, help = "test the model")

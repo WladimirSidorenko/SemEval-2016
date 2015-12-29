@@ -51,6 +51,21 @@ TXT_IDX = 3
 
 ##################################################################
 # Methods
+def translate_tag(a_tag):
+    """Convert string tag to an integer.
+
+    @param a_tag - tag to convert
+
+    @return int representation of the tag
+
+    """
+    a_tag = a_tag.lower()
+    if a_tag == "positive":
+        return 1
+    elif a_tag == "negative":
+        return 0
+    return int(a_tag)
+
 def get_fields(a_line):
     """Custom function for obtaining fields from line
 
@@ -87,7 +102,7 @@ def evaluate(a_ifile, a_verbose = False, a_get_fields = get_fields):
             print("WARNING: Unrecognized line format: '{:s}'".format(iline), file = sys.stderr)
             continue
         # obtain labels
-        gold, pred = int(ifields[GLD_IDX]), int(ifields[-1])
+        gold, pred = translate_tag(ifields[GLD_IDX]), translate_tag(ifields[-1])
         assert gold in CLASSES, "Unrecognized gold label: {:d}".format(gold)
         assert pred in CLASSES, "Unrecognized predicted label: {:d}".format(pred)
         # output error
