@@ -51,6 +51,21 @@ TXT_IDX = 3
 
 ##################################################################
 # Methods
+def translate_tag(a_tag):
+    """Convert symbolic tag to int.
+
+    @param a_tag - tag to convert
+
+    @return int representing the tag
+
+    """
+    if a_tag == "positive":
+        return 1
+    elif a_tag == "negative":
+        return 0
+    else:
+        return int(a_tag)
+
 def get_fields(a_line):
     """Custom function for obtaining fields from line
 
@@ -74,10 +89,11 @@ def evaluate(a_ifile, a_verbose = False, a_get_fields = get_fields):
     @return 2-tuple with macro- and micro-averaged MAE
 
     """
-    macro_MAE = micro_MAE = 0.
+    macro_MAE = micro_MAE = accuracy = f_measure = 0.
 
     ifields = None
     gold = pred = -1
+    correct = total = 0
     cstat = defaultdict(lambda: [0, 0])
     for iline in a_ifile:
         ifields = a_get_fields(iline)
@@ -87,9 +103,11 @@ def evaluate(a_ifile, a_verbose = False, a_get_fields = get_fields):
             print("WARNING: Unrecognized line format: '{:s}'".format(iline), file = sys.stderr)
             continue
         # obtain labels
-        gold, pred = int(ifields[GLD_IDX]), int(ifields[-1])
+        gold, pred = translate_tag(ifields[GLD_IDX]), translate_tag(ifields[-1])
         assert gold in CLASSES, "Unrecognized gold label: {:d}".format(gold)
         assert pred in CLASSES, "Unrecognized predicted label: {:d}".format(pred)
+        total += 1
+        correct += bool(gold == pred)
         # output error
         if a_verbose and gold != pred:
             print("{:d} confused with {:d} in message '{:s}'".format(\
@@ -98,11 +116,12 @@ def evaluate(a_ifile, a_verbose = False, a_get_fields = get_fields):
         cstat[gold][TOTAL_IDX] += 1
         cstat[gold][DIFF_IDX] += abs(gold - pred)
     # estimate MAE scores
+    accuracy = float(correct) / float(total or 1)
     macro_MAE = sum([float(dff) / (float(ttl) or 1.) for ttl, dff in cstat.itervalues()])
     macro_MAE /= float(len(CLASSES)) or 1.
     micro_MAE = float(sum([dff for _, dff in cstat.itervalues()]))
     micro_MAE /= float(sum([ttl for ttl, _ in cstat.itervalues()])) or 1.
-    return (macro_MAE, micro_MAE)
+    return (macro_MAE, micro_MAE, accuracy, f_measure)
 
 def main():
     """Main method for estimating mean absolute error on input files.
@@ -120,11 +139,13 @@ in TSV format""", type = argparse.FileType('r'), nargs = '*', default = [sys.std
     args = argparser.parse_args()
 
     # estimate MAE on each file
-    macro_MAE = micro_MAE = 0.
+    macro_MAE = micro_MAE = accuracy = f_measure = 0.
     for ifile in args.files:
-        macro_MAE, micro_MAE = evaluate(ifile, args.verbose)
+        macro_MAE, micro_MAE, accuracy, f_measure = evaluate(ifile, args.verbose)
         print("{:20s}{:.7}".format("Macro-averaged MAE:", macro_MAE), file = sys.stderr)
         print("{:20s}{:.7}".format("Micro-averaged MAE:", micro_MAE), file = sys.stderr)
+        print("{:20s}{:.7}".format("Accuracy:", accuracy), file = sys.stderr)
+        print("{:20s}{:.7}".format("F-Measure:", f_measure), file = sys.stderr)
 
 ##################################################################
 # Main

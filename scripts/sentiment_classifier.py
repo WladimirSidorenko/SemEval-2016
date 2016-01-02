@@ -78,15 +78,10 @@ class SentimentClassifier(object):
             raise RuntimeError("Can't create model at specified path: '{:s}'".format(a_path))
         # create and train an RNN model
         imodel = RNNModel()
-        imodel.fit(a_train_set)
+        imodel.fit(a_train_set, a_path)
         # remember model as instance attribute
         self.model = imodel
-        self.predict = self._predict
-        # dump trained model to disc
-        # sys.setrecursionlimit(1500) # model might be large to save
-        with open(a_path, "wb") as ofile:
-            self.model._predict = None
-            dump(self.model, ofile)
+        # self.predict = self._predict
 
     def _predict(self, a_inst):
         """Predict label of a new instance.
