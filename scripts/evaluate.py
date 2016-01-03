@@ -45,6 +45,7 @@ TAB_RE = re.compile(r"\t+")
 
 TOTAL_IDX = 0
 DIFF_IDX = 1
+PRDCT_IDX = DIFF_IDX
 
 GLD_IDX = 2
 TXT_IDX = 3
@@ -86,15 +87,16 @@ def evaluate(a_ifile, a_verbose = False, a_get_fields = get_fields):
                      be printed as well
     @param a_get_fields - custom function for obtaining fields from line
 
-    @return 2-tuple with macro- and micro-averaged MAE
+    @return 4-tuple with macro- and micro-averaged MAE, rho_pn, and accuracy
 
     """
-    macro_MAE = micro_MAE = accuracy = f_measure = 0.
+    macro_MAE = micro_MAE = rho_pn = accuracy = 0.
 
     ifields = None
     gold = pred = -1
-    correct = total = 0
+    correct = total = match = 0
     cstat = defaultdict(lambda: [0, 0])
+    rhostat = defaultdict(lambda: [0, 0])
     for iline in a_ifile:
         ifields = a_get_fields(iline)
         if not ifields:
@@ -106,22 +108,27 @@ def evaluate(a_ifile, a_verbose = False, a_get_fields = get_fields):
         gold, pred = translate_tag(ifields[GLD_IDX]), translate_tag(ifields[-1])
         assert gold in CLASSES, "Unrecognized gold label: {:d}".format(gold)
         assert pred in CLASSES, "Unrecognized predicted label: {:d}".format(pred)
+        match = int(gold == pred)
         total += 1
-        correct += bool(gold == pred)
+        correct += match
         # output error
         if a_verbose and gold != pred:
-            print("{:d} confused with {:d} in message '{:s}'".format(\
-                gold, pred, ifields[TXT_IDX]).encode(ENCODING))
+            print("{:d} predicted instead of {:d} in message '{:s}'".format(\
+                pred, gold, ifields[TXT_IDX]).encode(ENCODING))
         # update statistics
         cstat[gold][TOTAL_IDX] += 1
         cstat[gold][DIFF_IDX] += abs(gold - pred)
+        rhostat[gold][TOTAL_IDX] += 1
+        rhostat[gold][PRDCT_IDX] += match
     # estimate MAE scores
     accuracy = float(correct) / float(total or 1)
     macro_MAE = sum([float(dff) / (float(ttl) or 1.) for ttl, dff in cstat.itervalues()])
     macro_MAE /= float(len(CLASSES)) or 1.
     micro_MAE = float(sum([dff for _, dff in cstat.itervalues()]))
     micro_MAE /= float(sum([ttl for ttl, _ in cstat.itervalues()])) or 1.
-    return (macro_MAE, micro_MAE, accuracy, f_measure)
+    rho_pn = sum([float(v[PRDCT_IDX])/float(v[TOTAL_IDX] or 1) for v in rhostat.itervalues()]) / \
+             float(len(rhostat) or 1)
+    return (macro_MAE, micro_MAE, rho_pn, accuracy)
 
 def main():
     """Main method for estimating mean absolute error on input files.
@@ -139,13 +146,13 @@ in TSV format""", type = argparse.FileType('r'), nargs = '*', default = [sys.std
     args = argparser.parse_args()
 
     # estimate MAE on each file
-    macro_MAE = micro_MAE = accuracy = f_measure = 0.
+    macro_MAE = micro_MAE = rho_pn = accuracy = 0.
     for ifile in args.files:
-        macro_MAE, micro_MAE, accuracy, f_measure = evaluate(ifile, args.verbose)
+        macro_MAE, micro_MAE, rho_pn, accuracy = evaluate(ifile, args.verbose)
         print("{:20s}{:.7}".format("Macro-averaged MAE:", macro_MAE), file = sys.stderr)
         print("{:20s}{:.7}".format("Micro-averaged MAE:", micro_MAE), file = sys.stderr)
+        print("{:20s}{:.7}".format("$\\rho$^{PN}:", rho_pn), file = sys.stderr)
         print("{:20s}{:.7}".format("Accuracy:", accuracy), file = sys.stderr)
-        print("{:20s}{:.7}".format("F-Measure:", f_measure), file = sys.stderr)
 
 ##################################################################
 # Main
