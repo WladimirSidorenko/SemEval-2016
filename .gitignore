@@ -57,3 +57,4 @@ docs/_build/
 target/
 cripts/models/*.npy
 scripts/models/*.npy
+src/hello-world
