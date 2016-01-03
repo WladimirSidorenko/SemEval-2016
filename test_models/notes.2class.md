@@ -3,11 +3,13 @@ Baseline (majority class):
 awk 'NF {print $0 "\tpositive"}' data/dev/topic-two-point.BD.train.txt | ./scripts/evaluate.py
 Macro-averaged MAE: 0.2
 Micro-averaged MAE: 0.261157
+$\rho$^{PN}:        0.5
 Accuracy:           0.738843
 
 awk 'NF {print $0 "\tpositive"}' data/train/topic-two-point.BD.train.txt | ./scripts/evaluate.py
 Macro-averaged MAE: 0.2
 Micro-averaged MAE: 0.171875
+$\rho$^{PN}:        0.5
 Accuracy:           0.828125
 
 sentiment_2_class_3_iters_1685_cost.model
@@ -217,3 +219,33 @@ Train:
 Macro-averaged MAE: 0.1519615
 Micro-averaged MAE: 0.5272177
 Accuracy:           0.4727823
+
+sentiment_2_class_600_iters_222_cost.model
+===========================================
+Description:
+------------
+# Classification: 2 class
+# Cost: 222
+# of iterations: 600
+# Vector dimension: 31
+# of convolution filters width 2: 2
+# of convolution filters width 3: 4
+# of convolution filters width 4: 8
+# -dropout +He initialization +mean LSTM +Highway (wrong) +corpus re-balancing
+# Classification: 2 class
+
+Results:
+--------
+Dev:
+./scripts/twitter_sentiment test -m test_models/sentiment_2_class_600_iters_222_cost.model data/dev/topic-two-point.BD.msg.dev.txt | ./scripts/evaluate.py
+Macro-averaged MAE: 0.1526973
+Micro-averaged MAE: 0.2859504
+$\rho$^{PN}:        0.6182567
+Accuracy:           0.7140496
+
+Train:
+./scripts/twitter_sentiment test -m test_models/sentiment_2_class_600_iters_222_cost.model data/train/topic-two-point.BD.train.txt | ./scripts/evaluate.py
+Macro-averaged MAE: 0.09268522
+Micro-averaged MAE: 0.1393649
+$\rho$^{PN}:        0.7682869
+Accuracy:           0.8606351

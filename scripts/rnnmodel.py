@@ -20,12 +20,12 @@ from __future__ import print_function, unicode_literals
 
 # from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
 from cPickle import dump
-from collections import OrderedDict
+from collections import defaultdict, OrderedDict
 from datetime import datetime
 from itertools import chain
 
 from lasagne.init import HeNormal, HeUniform, Orthogonal
-from theano import config, tensor as TT
+from theano import config, printing, tensor as TT
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
 
 import numpy as np
@@ -42,14 +42,15 @@ HE_UNIFORM = HeUniform()
 HE_UNIFORM_RELU = HeUniform(gain = np.sqrt(2))
 HE_UNIFORM_LEAKY_RELU = HeUniform(gain = np.sqrt(2./(1+ (RELU_ALPHA or 1e-6)**2)))
 ORTHOGONAL = Orthogonal()
+CORPUS_PROPORTION = 1.8
 
 # default training parameters
 ALPHA = 5e-3
 EPSILON = 1e-5
-MAX_ITERS = 3
+MAX_ITERS = 10
 ADADELTA = 0
 SGD = 1
-SVM_C = 2.
+SVM_C = 1.5
 
 # default dimension of input vectors
 VEC_DIM = 64
@@ -108,6 +109,26 @@ def _rnd_orth_mtx(a_dim):
     W = np.random.randn(a_dim, a_dim)
     u, _, _ = np.linalg.svd(W)
     return u.astype(config.floatX)
+
+def _balance_ts(a_ts, a_min, a_class2idx):
+    """Obtained samples from trainset with balanced classes.
+
+    Args:
+    -----
+      (list of 2-tuples) a_ts: original (unbalanced) training set
+      (int) a_min: minimum number of instances pertaining to one class
+      (set of indices) a_class2idx: mapping from classes to particular indices
+
+    Yields:
+    -------
+      2-tuples sampled from a balanced set
+
+    """
+    samples = [i for v in a_class2idx.itervalues() \
+    for i in np.random.choice(v, min(CORPUS_PROPORTION * a_min, len(v)), replace = False)]
+    np.random.shuffle(samples)
+    for i in samples:
+        yield a_ts[i]
 
 def _get_minibatches_idx(idx_list, n, mb_size, shuffle = True):
     """Shuffle the dataset at each iteration.
@@ -279,8 +300,9 @@ class RNNModel(object):
         # initialize dropout layer
         # activation handle for the dropout layer
         # dropout_out = self._init_dropout(lstm_out[-1])
-        dropout_out = lstm_out.mean() + \
-                      TT.nnet.sigmoid(hw1_carry_out + hw2_carry_out).mean()
+        dropout_out = lstm_out.mean(axis = 0) + \
+                      TT.nnet.sigmoid(hw1_carry_out.mean(axis = 0)) + \
+                      TT.nnet.sigmoid(hw2_carry_out.mean(axis = 0))
 
         # LSTM debug function
         # lstm_debug = theano.function([self.W_INDICES], lstm_out, name = "lstm_debug")
@@ -302,11 +324,10 @@ class RNNModel(object):
 
         # cost gradients and updates
         cost = -TT.log(self.Y[0, y])
-        # cost = 0.5 * (tt.dot(self.LSTM2Y, self.LSTM2Y)).sum() + SVM_C * \
-        # (TT.max(self.Y * y, 0) ** 2).sum()
         # cost = self.Y.sum() - 2 * self.Y[0, y]
+        # cost = 0.5 * ((self.LSTM2Y ** 2).sum() + (self.Y_BIAS ** 2).sum()) + \
+        #        SVM_C * (TT.max(1 - self.Y * y, 0) ** 2).sum()
         gradients = TT.grad(cost, wrt = self._params)
-
         # define training function and let the training begin
         f_grad_shared, f_update = adadelta(self._params, gradients, \
                                            self.W_INDICES, y, cost)
@@ -324,6 +345,10 @@ class RNNModel(object):
         #                            [y_pred, self.Y[0, y_pred]], \
         #                            name = "predict")
 
+        class2indices = defaultdict(list)
+        for i, (_, y_i) in enumerate(a_trainset):
+            class2indices[y_i].append(i)
+        min_items = min([len(i) for i in class2indices.itervalues()])
         a_trainset = self._digitize_feats(a_trainset)
 
         time_delta = 0.
@@ -336,7 +361,7 @@ class RNNModel(object):
             icost = 0.
             start_time = datetime.utcnow()
             # iterate over training instances
-            for x_i, y_i in a_trainset:
+            for x_i, y_i in _balance_ts(a_trainset, min_items, class2indices):
                 icost += f_grad_shared(x_i, y_i)
                 f_update()
             # # iterate over minibatches
@@ -376,11 +401,18 @@ class RNNModel(object):
         if self._predict is None:
             # deactivate dropout when using the model
             self.use_dropout.set_value(0.)
-            y_pred = TT.argmax(self.Y)
+            y_pred = TT.argmax(self.Y, axis = 1)
             # prediction function
+            _dp = printing.Print("self.Y =")
+            _dp_Y = _dp(self.Y)
+            _dp = printing.Print("y_pred =")
+            _dp_Y_pred = _dp(y_pred)
+            self._debug_print_Y = theano.function([self.W_INDICES], [_dp_Y, _dp_Y_pred], \
+                                             name = "debug_print")
             self._predict = theano.function([self.W_INDICES], \
-                                            [y_pred, self.Y[y_pred]], \
+                                            [y_pred, self.Y[0, y_pred]], \
                                             name = "predict")
+        # self._debug_print_Y(self._feat2idcs(a_seq))
         y, score = self._predict(self._feat2idcs(a_seq))
         return (self.int2lbl[int(y)], score)
 
@@ -414,6 +446,9 @@ class RNNModel(object):
                 dint = self.lbl2int[ilabel]
                 # dlabel = np.zeros(self.n_labels)
                 # dlabel[dint] = 1 * self.int2coeff[dint]
+                # for SVM
+                # dlabel = np.ones(self.n_labels).astype("int32") * -1
+                # dlabel[dint] = 1
                 dlabel = dint
             # convert features to indices and append new training
             # instance

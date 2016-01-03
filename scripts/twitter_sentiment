@@ -25,6 +25,7 @@ from evaluate import evaluate, get_fields, GLD_IDX, TXT_IDX
 from twokenize import tokenize
 
 import argparse
+import re
 import sys
 
 ##################################################################
@@ -32,6 +33,14 @@ import sys
 TRAIN = "train"
 TEST = "test"
 EVALUATE = "evaluate"
+
+AMP_RE = re.compile(r"&amp;")
+GT_RE = re.compile(r"&gt;")
+LT_RE = re.compile(r"&lt;")
+TIME_RE = re.compile(r"\b[\d:]+(?:[ap]\.?m\.|th|rd|nd)\b", re.I)
+HTTP_RE = re.compile(r"(?:https?://\S*|\b(?:(?:[\w]{3,5}://?|(?:www|bit)[.]|(?:\w[-\w]+[.])+(?:a(?:ero|sia|[c-gil-oq-uwxz])|b(?:iz|[abd-jmnorstvwyz])|c(?:at|o(?:m|op)|[acdf-ik-orsuvxyz])|d[dejkmoz]|e(?:du|[ceghtu])|f[ijkmor]|g(?:ov|[abd-ilmnp-uwy])|h[kmnrtu]|i(?:n(?:fo|t)|[del-oq-t])|j(?:obs|[emop])|k[eghimnprwyz]|l[abcikr-vy]|m(?:il|obi|useum|[acdeghk-z])|n(?:ame|et|[acefgilopruz])|o(?:m|rg)|p(?:ro|[ae-hk-nrstwy])|qa|r[eosuw]|s[a-eg-or-vxyz]|t(?:(?:rav)?el|[cdfghj-pr])|xxx)\b)(?:[^\s,.:;]|\.\w)*))")
+AT_RE = re.compile(r"(RT\s+)?[.]?@\S+")
+SPACE_RE = re.compile("\s\s+")
 
 TAB = "\t"
 
@@ -50,6 +59,21 @@ def _add_cmn_options(a_parser):
     a_parser.add_argument("files", help = "input files in TSV format", \
                               type = argparse.FileType('r'), nargs = '*', default = [sys.stdin])
 
+def _cleanse(a_line):
+    """Remove spurious elements from line.
+
+    @param a_line - line to be cleansed
+
+    @return cleansed line
+
+    """
+    line = AT_RE.sub("", HTTP_RE.sub("", a_line))
+    line = AMP_RE.sub("&", TIME_RE.sub("", line))
+    # the line below is commented as it leads to worse learning rates
+    # line = GT_RE.sub(">", LT_RE.sub("<", line))
+    line = SPACE_RE.sub(' ', line.strip())
+    return line
+
 def _iterlines(a_file):
     """Iterate over input lines of a file
 
@@ -58,9 +82,12 @@ def _iterlines(a_file):
     @return iterator over resulting TSV fields
 
     """
+    ifields = []
     for iline in a_file:
         # compute prediction and append it to the list of fields
-        yield get_fields(iline)
+        ifields = get_fields(iline)
+        ifields[TXT_IDX] = _cleanse(ifields[TXT_IDX])
+        yield ifields
 
 def main():
     """Classify tweets according to their sentiment polarity
