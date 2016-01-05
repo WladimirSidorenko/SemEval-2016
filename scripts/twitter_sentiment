@@ -33,11 +33,12 @@ import sys
 TRAIN = "train"
 TEST = "test"
 EVALUATE = "evaluate"
+ENCODING = "utf-8"
 
 AMP_RE = re.compile(r"&amp;")
 GT_RE = re.compile(r"&gt;")
 LT_RE = re.compile(r"&lt;")
-TIME_RE = re.compile(r"\b[\d:]+(?:[ap]\.?m\.|th|rd|nd)\b", re.I)
+DIGIT_RE = re.compile(r"\b[\d:]+(?:[ap]\.?m\.|th|rd|nd)?\b", re.I)
 HTTP_RE = re.compile(r"(?:https?://\S*|\b(?:(?:[\w]{3,5}://?|(?:www|bit)[.]|(?:\w[-\w]+[.])+(?:a(?:ero|sia|[c-gil-oq-uwxz])|b(?:iz|[abd-jmnorstvwyz])|c(?:at|o(?:m|op)|[acdf-ik-orsuvxyz])|d[dejkmoz]|e(?:du|[ceghtu])|f[ijkmor]|g(?:ov|[abd-ilmnp-uwy])|h[kmnrtu]|i(?:n(?:fo|t)|[del-oq-t])|j(?:obs|[emop])|k[eghimnprwyz]|l[abcikr-vy]|m(?:il|obi|useum|[acdeghk-z])|n(?:ame|et|[acefgilopruz])|o(?:m|rg)|p(?:ro|[ae-hk-nrstwy])|qa|r[eosuw]|s[a-eg-or-vxyz]|t(?:(?:rav)?el|[cdfghj-pr])|xxx)\b)(?:[^\s,.:;]|\.\w)*))")
 AT_RE = re.compile(r"(RT\s+)?[.]?@\S+")
 SPACE_RE = re.compile("\s\s+")
@@ -68,10 +69,10 @@ def _cleanse(a_line):
 
     """
     line = AT_RE.sub("", HTTP_RE.sub("", a_line))
-    line = AMP_RE.sub("&", TIME_RE.sub("", line))
+    line = AMP_RE.sub("&", DIGIT_RE.sub("", line))
     # the line below is commented as it leads to worse learning rates
     # line = GT_RE.sub(">", LT_RE.sub("<", line))
-    line = SPACE_RE.sub(' ', line.strip())
+    line = SPACE_RE.sub(' ', line.strip()).lower()
     return line
 
 def _iterlines(a_file):
@@ -84,10 +85,22 @@ def _iterlines(a_file):
     """
     ifields = []
     for iline in a_file:
+        iline = iline.decode(ENCODING)
         # compute prediction and append it to the list of fields
         ifields = get_fields(iline)
         ifields[TXT_IDX] = _cleanse(ifields[TXT_IDX])
         yield ifields
+
+def _read_dataset(a_files):
+    """Read data set into a list of two-tuples with input items and gold classes.
+
+    @param a_files - input files containing training data
+
+    @return list of 2-tuples with input items and their gold classes
+
+    """
+    return [([list(w) for w in [''.join(tokenize(ifields[TXT_IDX]))]], ifields[GLD_IDX]) \
+            for ifile in a_files for ifields in _iterlines(ifile)]
 
 def main():
     """Classify tweets according to their sentiment polarity
@@ -101,6 +114,8 @@ tweets according to their sentiment polarity""")
     subparsers = argparser.add_subparsers(help="type of operation to perform", dest = "mode")
     # training options
     tr_parser = subparsers.add_parser(TRAIN, help = "train the model")
+    tr_parser.add_argument("-d", "--dev-set", help = "development set",
+                             type = argparse.FileType('r'))
     _add_cmn_options(tr_parser)
     # testing options
     test_parser = subparsers.add_parser(TEST, help = "test the model")
@@ -116,16 +131,18 @@ tweets according to their sentiment polarity""")
     # perform the requied action
     if args.mode == TRAIN:
         classifier = SentimentClassifier(a_path = None)
-        classifier.train([([list(w) for w in tokenize(ifields[TXT_IDX])], ifields[GLD_IDX]) \
-                          for ifile in args.files \
-                          for ifields in _iterlines(ifile)], a_path = args.model)
+        if args.dev_set is None:
+            dev_set = None
+        else:
+            dev_set = _read_dataset([args.dev_set])
+        classifier.train(_read_dataset(args.files), a_path = args.model, a_dev_set = dev_set)
     elif args.mode == TEST:
         # load model from default location
         y = ""; score = 0.
         classifier = SentimentClassifier()
         for ifile in args.files:
             for ifields in _iterlines(ifile):
-                y, score = classifier.predict([list(w) for w in tokenize(ifields[TXT_IDX])])
+                y, score = classifier.predict([list(w) for w in [''.join(tokenize(ifields[TXT_IDX]))]])
                 if args.verbose:
                     ifields.append(str(score))
                 ifields.append(y)

@@ -113,8 +113,9 @@ def evaluate(a_ifile, a_verbose = False, a_get_fields = get_fields):
         correct += match
         # output error
         if a_verbose and gold != pred:
-            print("{:d} predicted instead of {:d} in message '{:s}'".format(\
-                pred, gold, ifields[TXT_IDX]).encode(ENCODING))
+            print("{:s} predicted instead of {:s} in message '{:s}'".format(ifields[-1], \
+                                                                            ifields[GLD_IDX], \
+                                                                            ifields[TXT_IDX]).encode(ENCODING))
         # update statistics
         cstat[gold][TOTAL_IDX] += 1
         cstat[gold][DIFF_IDX] += abs(gold - pred)
@@ -149,10 +150,10 @@ in TSV format""", type = argparse.FileType('r'), nargs = '*', default = [sys.std
     macro_MAE = micro_MAE = rho_pn = accuracy = 0.
     for ifile in args.files:
         macro_MAE, micro_MAE, rho_pn, accuracy = evaluate(ifile, args.verbose)
-        print("{:20s}{:.7}".format("Macro-averaged MAE:", macro_MAE), file = sys.stderr)
-        print("{:20s}{:.7}".format("Micro-averaged MAE:", micro_MAE), file = sys.stderr)
-        print("{:20s}{:.7}".format("$\\rho$^{PN}:", rho_pn), file = sys.stderr)
-        print("{:20s}{:.7}".format("Accuracy:", accuracy), file = sys.stderr)
+        print("{:20s}{:.7f}".format("Macro-averaged MAE:", macro_MAE), file = sys.stderr)
+        print("{:20s}{:.7f}".format("Micro-averaged MAE:", micro_MAE), file = sys.stderr)
+        print("{:20s}{:.7f}".format("$\\rho$^{PN}:", rho_pn), file = sys.stderr)
+        print("{:20s}{:.7f}".format("Accuracy:", accuracy), file = sys.stderr)
 
 ##################################################################
 # Main

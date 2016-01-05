@@ -19,6 +19,7 @@ RNNModel - wrapper class around an RNN classifier
 from __future__ import print_function, unicode_literals
 
 # from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
+from evaluate import PRDCT_IDX, TOTAL_IDX
 from cPickle import dump
 from collections import defaultdict, OrderedDict
 from datetime import datetime
@@ -42,12 +43,13 @@ HE_UNIFORM = HeUniform()
 HE_UNIFORM_RELU = HeUniform(gain = np.sqrt(2))
 HE_UNIFORM_LEAKY_RELU = HeUniform(gain = np.sqrt(2./(1+ (RELU_ALPHA or 1e-6)**2)))
 ORTHOGONAL = Orthogonal()
-CORPUS_PROPORTION = 1.8
+CORPUS_PROPORTION_MAX = 2.
+CORPUS_PROPORTION_MIN = 3./4.
 
 # default training parameters
 ALPHA = 5e-3
 EPSILON = 1e-5
-MAX_ITERS = 10
+MAX_ITERS = 1000
 ADADELTA = 0
 SGD = 1
 SVM_C = 1.5
@@ -88,15 +90,16 @@ config.scan.allow_gc = True
 
 ##################################################################
 # Methods
-def _floatX(data):
+def _floatX(data, a_dtype = config.floatX):
     """Return numpy array populated with the given data.
 
     @param data - input tensor
+    @param dtype - digit type
 
     @return numpy array populated with the given data
 
     """
-    return np.asarray(data, dtype = config.floatX)
+    return np.asarray(data, dtype = a_dtype)
 
 def _rnd_orth_mtx(a_dim):
     """Return orthogonal matrix with random weights.
@@ -125,7 +128,8 @@ def _balance_ts(a_ts, a_min, a_class2idx):
 
     """
     samples = [i for v in a_class2idx.itervalues() \
-    for i in np.random.choice(v, min(CORPUS_PROPORTION * a_min, len(v)), replace = False)]
+    for i in np.random.choice(v, min(CORPUS_PROPORTION_MAX * a_min, \
+                                     CORPUS_PROPORTION_MIN * len(v)), replace = False)]
     np.random.shuffle(samples)
     for i in samples:
         yield a_ts[i]
@@ -262,7 +266,7 @@ class RNNModel(object):
         # the remianing parameters will be initialized immediately
         self._init_params()
 
-    def fit(self, a_trainset, a_path, \
+    def fit(self, a_trainset, a_path, a_devset = None, \
             a_batch_size = 16, a_optimizer = ADADELTA):
         """Train RNN model on the training set.
 
@@ -270,6 +274,8 @@ class RNNModel(object):
           set: a_trainset - trainig set as a list of 2-tuples with
                             training instances and classes
           str: a_path - path for storing the best model
+          set: a_devset - development set as a list of 2-tuples with
+                            training instances and classes
           int: a_batch_size - size of single training batch
           method: a_optimizer - optimizer to use (ADADELTA or SGD)
 
@@ -300,9 +306,9 @@ class RNNModel(object):
         # initialize dropout layer
         # activation handle for the dropout layer
         # dropout_out = self._init_dropout(lstm_out[-1])
-        dropout_out = lstm_out.mean(axis = 0) + \
-                      TT.nnet.sigmoid(hw1_carry_out.mean(axis = 0)) + \
-                      TT.nnet.sigmoid(hw2_carry_out.mean(axis = 0))
+        dropout_out = self.LSTM_COEFF * lstm_out.sum(axis = 0) + \
+                      self.EMB_COEFF * TT.nnet.sigmoid(hw1_carry_out.sum(axis = 0)) + \
+                      self.CONV_COEFF * TT.nnet.sigmoid(hw2_carry_out.sum(axis = 0))
 
         # LSTM debug function
         # lstm_debug = theano.function([self.W_INDICES], lstm_out, name = "lstm_debug")
@@ -339,55 +345,73 @@ class RNNModel(object):
         #                             outputs = cost, updates = updates)
 
         # Predictions:
-        # y_pred = TT.argmax(self.Y, axis = 1)
+        y_pred = TT.argmax(self.Y, axis = 1)
         # prediction function
-        # _predict = theano.function([self.W_INDICES], \
-        #                            [y_pred, self.Y[0, y_pred]], \
-        #                            name = "predict")
+        _predict = theano.function([self.W_INDICES], \
+                                   [y_pred], \
+                                   name = "predict")
 
         class2indices = defaultdict(list)
         for i, (_, y_i) in enumerate(a_trainset):
             class2indices[y_i].append(i)
         min_items = min([len(i) for i in class2indices.itervalues()])
         a_trainset = self._digitize_feats(a_trainset)
+        if a_devset is not None:
+            a_devset = self._digitize_feats(a_devset)
+            # initialize and populate rho statistics
+            rhostat = defaultdict(lambda: [0, 0])
+            for _, y in a_devset:
+                rhostat[y][TOTAL_IDX] += 1
 
         time_delta = 0.
         start_time = end_time = None
         N = len(a_trainset)
         idx_list = np.arange(N, dtype="int32")
         mb_size = max(N // 10, 1)
-        prev_cost = icost = min_cost = best_cost = INF
+
+        dev_score = max_dev_score = -INF
+        if a_devset is None:
+            max_dev_score = dev_score = 0.
+        icost = prev_cost = min_train_cost = INF
         for i in xrange(MAX_ITERS):
             icost = 0.
             start_time = datetime.utcnow()
-            # iterate over training instances
+            # iterate over the training instances
             for x_i, y_i in _balance_ts(a_trainset, min_items, class2indices):
                 icost += f_grad_shared(x_i, y_i)
                 f_update()
-            # # iterate over minibatches
-            # for mb in _get_minibatches_idx(idx_list, N, mb_size):
-            #     for t in mb:
-            #         x_i, y_i = a_trainset[t]
-            #         # print("y_i =", repr(y_i))
-            #         # print("y_pred =", repr(_predict(x_i)[0]))
-            #         # alternative cost implementation
-            #         # icost += train(x_i, y_i, ALPHA)
-            #         icost += f_grad_shared(x_i, y_i)
-            #     f_update()
+            # dump the best model
+            if icost < min_train_cost:
+                # dump trained model to disc, if no development set was supplied
+                # sys.setrecursionlimit(1500) # model might be large to save
+                if a_devset is None:
+                    self._dump(a_path)
+                min_train_cost = icost
+            if a_devset is not None:
+                # reset rho statistics
+                for k in rhostat:
+                    rhostat[k][PRDCT_IDX] = 0
+                # compute rho statistics anew
+                for x_i, y_i in a_devset:
+                    rhostat[y_i][PRDCT_IDX] += (_predict(x_i)[0] == y_i)
+                dev_score = sum([float(v[PRDCT_IDX])/float(v[TOTAL_IDX] or 1.) \
+                                for v in rhostat.itervalues()]) / \
+                                    float(len(rhostat) or 1)
+                if dev_score > max_dev_score:
+                    self._dump(a_path)
+                    max_dev_score = dev_score
             end_time = datetime.utcnow()
             time_delta = (end_time - start_time).seconds
-            # dump the best model
-            if icost < min_cost:
-                # dump trained model to disc
-                # sys.setrecursionlimit(1500) # model might be large to save
-                with open(a_path, "wb") as ofile:
-                    dump(self, ofile)
-                min_cost = icost
-            print("Iteration #{:d}: cost = {:.10f} ({:.5f} sec)".format(i, icost, time_delta), \
+            print("Iteration #{:d}: train_cost = {:.10f}, dev_score = {:.5f} ({:.2f} sec);".format(i, \
+                                                                                                  icost, \
+                                                                                                  dev_score, \
+                                                                                                  time_delta), \
                   file = sys.stderr)
             if prev_cost != INF and 0. <= (prev_cost - icost) < EPSILON:
                 break
             prev_cost = icost
+        print("Minimum train cost = {:.10f}, dev score = {:.10f}".format(min_train_cost, \
+                                                                         max_dev_score))
         return icost
 
     def predict(self, a_seq):
@@ -513,7 +537,7 @@ class RNNModel(object):
         # CONVOLUTIONS #
         ################
         # three convolutional filters for strides of width 2
-        self.n_conv2 = 2 # number of filters
+        self.n_conv2 = 4 # number of filters
         self.conv2_width = 2 # width of stride
         self.CONV2 = theano.shared(value = HE_NORMAL.sample((self.n_conv2, 1, \
                                                              self.conv2_width, self.vdim)), \
@@ -521,7 +545,7 @@ class RNNModel(object):
         self.CONV2_BIAS = theano.shared(value = HE_NORMAL.sample((1, self.n_conv2)), \
                                         name = "CONV2_BIAS")
         # four convolutional filters for strides of width 3
-        self.n_conv3 = 4 # number of filters
+        self.n_conv3 = 8 # number of filters
         self.conv3_width = 3 # width of stride
         self.CONV3 = theano.shared(value = HE_NORMAL.sample((self.n_conv3, 1, \
                                                              self.conv3_width, self.vdim)), \
@@ -529,7 +553,7 @@ class RNNModel(object):
         self.CONV3_BIAS = theano.shared(value = HE_NORMAL.sample((1, self.n_conv3)), \
                                         name = "CONV3_BIAS")
         # five convolutional filters for strides of width 4
-        self.n_conv4 = 8 # number of filters
+        self.n_conv4 = 14 # number of filters
         self.conv4_width = 4 # width of stride
         self.CONV4 = theano.shared(value = HE_NORMAL.sample((self.n_conv4, 1, \
                                                              self.conv4_width, self.vdim)), \
@@ -544,12 +568,13 @@ class RNNModel(object):
         ############
         self.n_lstm = self.n_conv2 + self.n_conv3 + self.n_conv4
         # the 1-st highway links character embeddings to the output
+        self.HW1_TRANS_COEFF = theano.shared(value = _floatX(0.75) , name = "HW1_TRANS_COEFF")
         self.HW1_TRANS = theano.shared(value = HE_UNIFORM_RELU.sample((self.vdim, self.n_lstm)), \
                                        name = "HW1_TRANS")
         self.HW1_TRANS_BIAS = theano.shared(value = \
                                             HE_UNIFORM_RELU.sample((1, self.n_lstm)).flatten(), \
                                             name = "HW1_TRANS_BIAS")
-        self._params += [self.HW1_TRANS, self.HW1_TRANS_BIAS]
+        self._params += [self.HW1_TRANS_COEFF, self.HW1_TRANS, self.HW1_TRANS_BIAS]
         # the 2-nd highway links convolutions to the output
         self.HW2_TRANS = theano.shared(value = HE_UNIFORM.sample((self.n_lstm, self.n_lstm)), \
                                        name = "HW2_TRANS")
@@ -570,6 +595,14 @@ class RNNModel(object):
         self.LSTM_BIAS = theano.shared(HE_NORMAL.sample((1, self.n_lstm * 4)).flatten(), \
                                        name = "LSTM_BIAS")
         self._params += [self.LSTM_W, self.LSTM_U, self.LSTM_BIAS]
+        ################
+        # Coefficients #
+        ################
+        self.EMB_COEFF = theano.shared(value = _floatX(0.25) , name = "EMB_COEFF")
+        self.CONV_COEFF = theano.shared(value = _floatX(0.5) , name = "CONV_COEFF")
+        self.LSTM_COEFF = theano.shared(value = _floatX(1.) , name = "LSTM_COEFF")
+
+        self._params += [self.EMB_COEFF, self.CONV_COEFF, self.LSTM_COEFF]
         ###########
         # DROPOUT #
         ###########
@@ -605,9 +638,10 @@ class RNNModel(object):
         # length of character input
         in_len = a_x.shape[0]
         # input to convolutional layer
-        conv_in = self.EMB[a_x].reshape((1, 1, in_len, self.vdim))
+        conv_in = self.HW1_TRANS_COEFF * self.EMB[a_x].reshape((1, 1, in_len, self.vdim))
         # first highway passes embeddings to convolutions and directly to the output layer
-        hw1_carry = TT.nnet.relu(TT.dot(self.EMB[a_x].mean(axis = 0).reshape((self.vdim,)), \
+        hw1_carry = (1 - self.HW1_TRANS_COEFF) * \
+                    TT.nnet.relu(TT.dot(self.EMB[a_x].mean(axis = 0).reshape((self.vdim,)), \
                                         self.HW1_TRANS) + self.HW1_TRANS_BIAS, alpha = RELU_ALPHA)
         # width-2 convolutions
         conv2_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV2), \
@@ -698,6 +732,17 @@ class RNNModel(object):
                                                     dtype = a_input.dtype)),
                            a_input * 0.5)
         return output
+
+    def _dump(self, a_path):
+        """Dump this model to disc at the given path.
+
+        @param a_path - path to file in which to store the model
+
+        @return \c void
+
+        """
+        with open(a_path, "wb") as ofile:
+            dump(self, ofile)
 
     def _reset(self):
         """Reset instance variables.
