@@ -35,13 +35,19 @@ TEST = "test"
 EVALUATE = "evaluate"
 ENCODING = "utf-8"
 
+POS_CHAR = ''
+NEG_CHAR = ''
+POS_RE = re.compile(r"[\b\A](amazing|better|best|cool||fun|fant|good|great|like|love|luv|wow|wonder\b|:\))")
+NEG_RE = re.compile(r"\b(must|crush|satan|severe|hat[ei]|hein|barb|don't want)")
+
+STOP_WORDS_RE = re.compile(r"\b(the(?:re)?|(?:any|every)body|here|from|an?|i[stn]|are|was|we(?:re)|ha[ds]|have|to|with|will|all|each|wh(?:en|re|o|at)(?:ever)?|may|might|i(?:'?m)?|that|the[my]|their|we\'?re|\'?s|through|by|been|this|as|going|do(?:es)?|did|about|[bmw]e|y?ou(?:rs?)?|u|some(?:thing|one)?|and|o[fr]|for|\'?(?:ve|d)|us|s?he|on|(?:some)?where|so|[ia]t|it\'?s|gonna|cc|\'?ll|may|take[ns]?|took|how|let|her|hi[ms]|my|(?:an)?other|g[eo]ts?|ac/dc|amazon|amazon\s+prime|amazon\s+prime\s+day|angela\s+merkel|apple|apple\s+watch|arsenal|barca|batman|bbc|bentley|bernie\s+sanders|beyonce|bobby\s+jindal|bob\s+marley|chelsea|chris\s+brown|conor\s+mcgregor|david\s+beckham|david\s+cameron|digi|disneyland|donald\s+trump|erdogan|eric\s+church|federer|fleetwood\s+mac|galaxy\s+note|game\s+of\s+thrones|google|google\+|grateful\s+dead|hannibal|harper|harry\s+potter|hillary|ibm|ihop|ios|ipad|iphone|ipod|jay-z|jeb\s+bush|joe\s+biden|jurassic\s+park|jurassic\s+world|justin|juventus|kerry|kurt\s+cobain|labor\s+day|lexus|madonna|magic\s+mike\s+xxl|mariah\s+carey|messi|metlife|what|can|either|[oi]nto|via|if|hi|one|two|-+|,+|[.%$]+)\b")
 AMP_RE = re.compile(r"&amp;")
 GT_RE = re.compile(r"&gt;")
 LT_RE = re.compile(r"&lt;")
-DIGIT_RE = re.compile(r"\b[\d:]+(?:[ap]\.?m\.|th|rd|nd)?\b", re.I)
+DIGIT_RE = re.compile(r"\b[\d:]+(?:[ap]\.?m\.|th|rd|nd|m|b)?\b")
 HTTP_RE = re.compile(r"(?:https?://\S*|\b(?:(?:[\w]{3,5}://?|(?:www|bit)[.]|(?:\w[-\w]+[.])+(?:a(?:ero|sia|[c-gil-oq-uwxz])|b(?:iz|[abd-jmnorstvwyz])|c(?:at|o(?:m|op)|[acdf-ik-orsuvxyz])|d[dejkmoz]|e(?:du|[ceghtu])|f[ijkmor]|g(?:ov|[abd-ilmnp-uwy])|h[kmnrtu]|i(?:n(?:fo|t)|[del-oq-t])|j(?:obs|[emop])|k[eghimnprwyz]|l[abcikr-vy]|m(?:il|obi|useum|[acdeghk-z])|n(?:ame|et|[acefgilopruz])|o(?:m|rg)|p(?:ro|[ae-hk-nrstwy])|qa|r[eosuw]|s[a-eg-or-vxyz]|t(?:(?:rav)?el|[cdfghj-pr])|xxx)\b)(?:[^\s,.:;]|\.\w)*))")
 AT_RE = re.compile(r"(RT\s+)?[.]?@\S+")
-SPACE_RE = re.compile("\s\s+")
+SPACE_RE = re.compile(r"\s\s+")
 
 TAB = "\t"
 
@@ -68,11 +74,14 @@ def _cleanse(a_line):
     @return cleansed line
 
     """
-    line = AT_RE.sub("", HTTP_RE.sub("", a_line))
-    line = AMP_RE.sub("&", DIGIT_RE.sub("", line))
-    # the line below is commented as it leads to worse learning rates
+    line = AT_RE.sub("", HTTP_RE.sub("", a_line.lower()))
+    line = AMP_RE.sub("", DIGIT_RE.sub("", line))
     # line = GT_RE.sub(">", LT_RE.sub("<", line))
-    line = SPACE_RE.sub(' ', line.strip()).lower()
+    line = STOP_WORDS_RE.sub("", line)
+    line = SPACE_RE.sub(' ', line.strip())
+    print("modified line =", repr(line), file = sys.stderr)
+    # line = POS_RE.sub(POS_CHAR + "\\1", line)
+    # line = NEG_RE.sub(NEG_CHAR + "\\1", line)
     return line
 
 def _iterlines(a_file):
@@ -142,7 +151,8 @@ tweets according to their sentiment polarity""")
         classifier = SentimentClassifier()
         for ifile in args.files:
             for ifields in _iterlines(ifile):
-                y, score = classifier.predict([list(w) for w in [''.join(tokenize(ifields[TXT_IDX]))]])
+                y, score = classifier.predict([list(w) for w in \
+                                               [''.join(tokenize(ifields[TXT_IDX]))]])
                 if args.verbose:
                     ifields.append(str(score))
                 ifields.append(y)

@@ -38,13 +38,13 @@ import theano
 # Variables and Constants
 INF = float("inf")
 SEED = 1
-RELU_ALPHA = 0.
+RELU_ALPHA = 0.5
 HE_NORMAL = HeNormal()
 HE_UNIFORM = HeUniform()
 HE_UNIFORM_RELU = HeUniform(gain = np.sqrt(2))
 HE_UNIFORM_LEAKY_RELU = HeUniform(gain = np.sqrt(2./(1+ (RELU_ALPHA or 1e-6)**2)))
 ORTHOGONAL = Orthogonal()
-CORPUS_PROPORTION_MAX = 1.
+CORPUS_PROPORTION_MAX = 1.1
 CORPUS_PROPORTION_MIN = 0.55
 
 # default training parameters
@@ -80,8 +80,8 @@ END = "___%END%___"
 AUX_VEC_KEYS = [EMP, UNK, BEG, END]
 
 # theano options
-config.allow_gc = True
-config.scan.allow_gc = True
+# config.allow_gc = True
+# config.scan.allow_gc = True
 
 # theano profiling
 # specify on the command line: THEANO_FLAGS=device=cpu,optimizer_excluding=fusion:inplace
@@ -548,7 +548,7 @@ class RNNModel(object):
         self.CONV2_BIAS = theano.shared(value = HE_NORMAL.sample((1, self.n_conv2)), \
                                         name = "CONV2_BIAS")
         # four convolutional filters for strides of width 3
-        self.n_conv3 = 10 # number of filters
+        self.n_conv3 = 12 # number of filters
         self.conv3_width = 3 # width of stride
         self.CONV3 = theano.shared(value = HE_NORMAL.sample((self.n_conv3, 1, \
                                                              self.conv3_width, self.vdim)), \
@@ -556,7 +556,7 @@ class RNNModel(object):
         self.CONV3_BIAS = theano.shared(value = HE_NORMAL.sample((1, self.n_conv3)), \
                                         name = "CONV3_BIAS")
         # five convolutional filters for strides of width 4
-        self.n_conv4 = 15 # number of filters
+        self.n_conv4 = 17 # number of filters
         self.conv4_width = 4 # width of stride
         self.CONV4 = theano.shared(value = HE_NORMAL.sample((self.n_conv4, 1, \
                                                              self.conv4_width, self.vdim)), \
