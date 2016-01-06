@@ -22,6 +22,7 @@ from __future__ import print_function, unicode_literals
 from evaluate import PRDCT_IDX, TOTAL_IDX
 from cPickle import dump
 from collections import defaultdict, OrderedDict
+from copy import deepcopy
 from datetime import datetime
 from itertools import chain
 
@@ -43,8 +44,8 @@ HE_UNIFORM = HeUniform()
 HE_UNIFORM_RELU = HeUniform(gain = np.sqrt(2))
 HE_UNIFORM_LEAKY_RELU = HeUniform(gain = np.sqrt(2./(1+ (RELU_ALPHA or 1e-6)**2)))
 ORTHOGONAL = Orthogonal()
-CORPUS_PROPORTION_MAX = 2.
-CORPUS_PROPORTION_MIN = 3./4.
+CORPUS_PROPORTION_MAX = 1.
+CORPUS_PROPORTION_MIN = 0.55
 
 # default training parameters
 ALPHA = 5e-3
@@ -128,8 +129,9 @@ def _balance_ts(a_ts, a_min, a_class2idx):
 
     """
     samples = [i for v in a_class2idx.itervalues() \
-    for i in np.random.choice(v, min(CORPUS_PROPORTION_MAX * a_min, \
-                                     CORPUS_PROPORTION_MIN * len(v)), replace = False)]
+               for i in np.random.choice(v, min(CORPUS_PROPORTION_MAX * a_min, \
+                                                CORPUS_PROPORTION_MIN * len(v)), \
+                                         replace = False)]
     np.random.shuffle(samples)
     for i in samples:
         yield a_ts[i]
@@ -286,9 +288,11 @@ class RNNModel(object):
         if len(a_trainset) == 0:
             return
         # estimate the number of distinct features and the longest sequence
+        labels = set()
         featset = set()
         self.max_len = 0
-        for wlist, _ in a_trainset:
+        for wlist, lbl in a_trainset:
+            labels.add(lbl)
             for w in wlist:
                 featset.update(w)
                 # append auxiliary items to training instances
@@ -296,19 +300,18 @@ class RNNModel(object):
                 self.max_len = max(self.max_len, len(w))
         self.V = len(AUX_VEC_KEYS) + len(featset)
         del featset
-        self.n_labels = len(set([t[1] for t in a_trainset]))
+        self.n_labels = len(labels)
 
         # initialize embedding matrix for features
         self._init_emb()
 
         # initialize LSTM layer
-        lstm_out, hw1_carry_out, hw2_carry_out = self._init_lstm()
+        lstm_out, hw2_carry_out = self._init_lstm()
         # initialize dropout layer
         # activation handle for the dropout layer
         # dropout_out = self._init_dropout(lstm_out[-1])
-        dropout_out = self.LSTM_COEFF * lstm_out.sum(axis = 0) + \
-                      self.EMB_COEFF * TT.nnet.sigmoid(hw1_carry_out.sum(axis = 0)) + \
-                      self.CONV_COEFF * TT.nnet.sigmoid(hw2_carry_out.sum(axis = 0))
+        dropout_out = self.LSTM_COEFF * lstm_out * \
+                      self.CONV_COEFF * TT.nnet.sigmoid(hw2_carry_out)
 
         # LSTM debug function
         # lstm_debug = theano.function([self.W_INDICES], lstm_out, name = "lstm_debug")
@@ -537,7 +540,7 @@ class RNNModel(object):
         # CONVOLUTIONS #
         ################
         # three convolutional filters for strides of width 2
-        self.n_conv2 = 4 # number of filters
+        self.n_conv2 = 5 # number of filters
         self.conv2_width = 2 # width of stride
         self.CONV2 = theano.shared(value = HE_NORMAL.sample((self.n_conv2, 1, \
                                                              self.conv2_width, self.vdim)), \
@@ -545,7 +548,7 @@ class RNNModel(object):
         self.CONV2_BIAS = theano.shared(value = HE_NORMAL.sample((1, self.n_conv2)), \
                                         name = "CONV2_BIAS")
         # four convolutional filters for strides of width 3
-        self.n_conv3 = 8 # number of filters
+        self.n_conv3 = 10 # number of filters
         self.conv3_width = 3 # width of stride
         self.CONV3 = theano.shared(value = HE_NORMAL.sample((self.n_conv3, 1, \
                                                              self.conv3_width, self.vdim)), \
@@ -553,7 +556,7 @@ class RNNModel(object):
         self.CONV3_BIAS = theano.shared(value = HE_NORMAL.sample((1, self.n_conv3)), \
                                         name = "CONV3_BIAS")
         # five convolutional filters for strides of width 4
-        self.n_conv4 = 14 # number of filters
+        self.n_conv4 = 15 # number of filters
         self.conv4_width = 4 # width of stride
         self.CONV4 = theano.shared(value = HE_NORMAL.sample((self.n_conv4, 1, \
                                                              self.conv4_width, self.vdim)), \
@@ -568,13 +571,13 @@ class RNNModel(object):
         ############
         self.n_lstm = self.n_conv2 + self.n_conv3 + self.n_conv4
         # the 1-st highway links character embeddings to the output
-        self.HW1_TRANS_COEFF = theano.shared(value = _floatX(0.75) , name = "HW1_TRANS_COEFF")
-        self.HW1_TRANS = theano.shared(value = HE_UNIFORM_RELU.sample((self.vdim, self.n_lstm)), \
-                                       name = "HW1_TRANS")
-        self.HW1_TRANS_BIAS = theano.shared(value = \
-                                            HE_UNIFORM_RELU.sample((1, self.n_lstm)).flatten(), \
-                                            name = "HW1_TRANS_BIAS")
-        self._params += [self.HW1_TRANS_COEFF, self.HW1_TRANS, self.HW1_TRANS_BIAS]
+        # self.HW1_TRANS_COEFF = theano.shared(value = _floatX(0.75) , name = "HW1_TRANS_COEFF")
+        # self.HW1_TRANS = theano.shared(value = HE_UNIFORM_RELU.sample((self.vdim, self.n_lstm)), \
+        #                                name = "HW1_TRANS")
+        # self.HW1_TRANS_BIAS = theano.shared(value = \
+        #                                     HE_UNIFORM_RELU.sample((1, self.n_lstm)).flatten(), \
+        #                                     name = "HW1_TRANS_BIAS")
+        # self._params += [self.HW1_TRANS_COEFF, self.HW1_TRANS, self.HW1_TRANS_BIAS]
         # the 2-nd highway links convolutions to the output
         self.HW2_TRANS = theano.shared(value = HE_UNIFORM.sample((self.n_lstm, self.n_lstm)), \
                                        name = "HW2_TRANS")
@@ -598,11 +601,11 @@ class RNNModel(object):
         ################
         # Coefficients #
         ################
-        self.EMB_COEFF = theano.shared(value = _floatX(0.25) , name = "EMB_COEFF")
+        # self.EMB_COEFF = theano.shared(value = _floatX(0.25) , name = "EMB_COEFF")
         self.CONV_COEFF = theano.shared(value = _floatX(0.5) , name = "CONV_COEFF")
         self.LSTM_COEFF = theano.shared(value = _floatX(1.) , name = "LSTM_COEFF")
 
-        self._params += [self.EMB_COEFF, self.CONV_COEFF, self.LSTM_COEFF]
+        self._params += [self.CONV_COEFF, self.LSTM_COEFF]
         ###########
         # DROPOUT #
         ###########
@@ -638,26 +641,23 @@ class RNNModel(object):
         # length of character input
         in_len = a_x.shape[0]
         # input to convolutional layer
-        conv_in = self.HW1_TRANS_COEFF * self.EMB[a_x].reshape((1, 1, in_len, self.vdim))
+        conv_in = self.EMB[a_x].reshape((1, 1, in_len, self.vdim))
         # first highway passes embeddings to convolutions and directly to the output layer
-        hw1_carry = (1 - self.HW1_TRANS_COEFF) * \
-                    TT.nnet.relu(TT.dot(self.EMB[a_x].mean(axis = 0).reshape((self.vdim,)), \
-                                        self.HW1_TRANS) + self.HW1_TRANS_BIAS, alpha = RELU_ALPHA)
+        # hw1_carry = (1 - self.HW1_TRANS_COEFF) * \
+        #             TT.nnet.relu(TT.dot(self.EMB[a_x].mean(axis = 0).reshape((self.vdim,)), \
+        #                                 self.HW1_TRANS) + self.HW1_TRANS_BIAS, alpha = RELU_ALPHA)
         # width-2 convolutions
         conv2_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV2), \
-                                   (self.n_conv2, in_len - self.conv2_width + 1)).T
-        conv2_max_out = conv2_out[TT.argmax(TT.sum(conv2_out, axis = 1)),:] + \
-            self.CONV2_BIAS
+                               (self.n_conv2, in_len - self.conv2_width + 1)).T
+        conv2_max_out = conv2_out.max(axis = 0) + self.CONV2_BIAS
         # width-3 convolutions
         conv3_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV3), \
-                                   (self.n_conv3, in_len - self.conv3_width + 1)).T
-        conv3_max_out = conv3_out[TT.argmax(TT.sum(conv3_out, axis = 1)),:] + \
-            self.CONV3_BIAS
+                               (self.n_conv3, in_len - self.conv3_width + 1)).T
+        conv3_max_out = conv3_out.max(axis = 0) + self.CONV3_BIAS
         # width-4 convolutions
         conv4_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV4), \
-                                   (self.n_conv4, in_len - self.conv4_width + 1)).T
-        conv4_max_out = conv4_out[TT.argmax(TT.sum(conv4_out, axis = 1)),:] + \
-            self.CONV4_BIAS
+                               (self.n_conv4, in_len - self.conv4_width + 1)).T
+        conv4_max_out = conv4_out.max(axis = 0) + self.CONV4_BIAS
         # output convolutions
         conv_max_out = TT.concatenate([conv2_max_out, conv3_max_out, \
                                        conv4_max_out], axis = 1)
@@ -666,7 +666,7 @@ class RNNModel(object):
         hw2_carry = TT.nnet.relu(conv_max_out[0,:] * (1. - hw2_trans), alpha = RELU_ALPHA)
         # lstm_in = TT.dot(conv_max_out[0,:], self.LSTM_W) + self.LSTM_BIAS
         lstm_in = TT.dot(hw2_trans, self.LSTM_W) + self.LSTM_BIAS
-        return lstm_in, hw1_carry, hw2_carry
+        return lstm_in, hw2_carry
 
     def _init_lstm(self):
         """Initialize parameters of LSTM layer.
@@ -675,7 +675,7 @@ class RNNModel(object):
 
         """
         # single LSTM recurrence step function
-        def _lstm_step(x_, o_, m_, c1_, c2_):
+        def _lstm_step(x_, o_, m_, c2_):
             """Single LSTM recurrence step.
 
             @param x_ - indices of input characters
@@ -688,7 +688,7 @@ class RNNModel(object):
 
             """
             # obtain character convolutions for input indices
-            lstm_in, hw1_carry, hw2_carry = self._emb2conv(x_)
+            lstm_in, hw2_carry = self._emb2conv(x_)
             # compute common term for all LSTM components
             proxy = TT.nnet.sigmoid(lstm_in + TT.dot(o_, self.LSTM_U))
             # input
@@ -702,16 +702,15 @@ class RNNModel(object):
             # new outout state
             o = o * TT.tanh(m)
             # return new output and memory state
-            return o, m, hw1_carry, hw2_carry
+            return o, m, hw2_carry
         # `scan' function
         res, _ = theano.scan(_lstm_step,
                              sequences = [self.W_INDICES],
                              outputs_info = [np.zeros(self.n_lstm).astype(config.floatX),
                                              np.zeros(self.n_lstm).astype(config.floatX),
-                                             np.zeros(self.n_lstm).astype(config.floatX),
                                              np.zeros(self.n_lstm).astype(config.floatX)],
                                    name = "_lstm_layers")
-        return (res[0], res[-2], res[-1])
+        return (res[0], res[-1])
 
     def _init_dropout(self, a_input):
         """Create a dropout layer.
