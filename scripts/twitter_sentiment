@@ -21,7 +21,7 @@ twitter_sentiment [MODE] [OPTIONS] [input_file]
 from __future__ import print_function, unicode_literals
 
 from sentiment_classifier import SentimentClassifier
-from evaluate import evaluate, get_fields, GLD_IDX, TXT_IDX
+from evaluate import evaluate, get_fields, GLD_IDX, TXT_IDX, TOPIC_IDX
 from twokenize import tokenize
 
 import argparse
@@ -37,14 +37,16 @@ ENCODING = "utf-8"
 
 POS_CHAR = ''
 NEG_CHAR = ''
+TOPIC2RE = {}
 POS_RE = re.compile(r"[\b\A](amazing|better|best|cool||fun|fant|good|great|like|love|luv|wow|wonder\b|:\))")
-NEG_RE = re.compile(r"\b(must|crush|satan|severe|hat[ei]|hein|barb|don't want)")
 
-STOP_WORDS_RE = re.compile(r"\b(the(?:re)?|(?:any|every)body|here|from|an?|i[stn]|are|was|we(?:re)|ha[ds]|have|to|with|will|all|each|wh(?:en|re|o|at)(?:ever)?|may|might|i(?:'?m)?|that|the[my]|their|we\'?re|\'?s|through|by|been|this|as|going|do(?:es)?|did|about|[bmw]e|y?ou(?:rs?)?|u|some(?:thing|one)?|and|o[fr]|for|\'?(?:ve|d)|us|s?he|on|(?:some)?where|so|[ia]t|it\'?s|gonna|cc|\'?ll|may|take[ns]?|took|how|let|her|hi[ms]|my|(?:an)?other|g[eo]ts?|ac/dc|amazon|amazon\s+prime|amazon\s+prime\s+day|angela\s+merkel|apple|apple\s+watch|arsenal|barca|batman|bbc|bentley|bernie\s+sanders|beyonce|bobby\s+jindal|bob\s+marley|chelsea|chris\s+brown|conor\s+mcgregor|david\s+beckham|david\s+cameron|digi|disneyland|donald\s+trump|erdogan|eric\s+church|federer|fleetwood\s+mac|galaxy\s+note|game\s+of\s+thrones|google|google\+|grateful\s+dead|hannibal|harper|harry\s+potter|hillary|ibm|ihop|ios|ipad|iphone|ipod|jay-z|jeb\s+bush|joe\s+biden|jurassic\s+park|jurassic\s+world|justin|juventus|kerry|kurt\s+cobain|labor\s+day|lexus|madonna|magic\s+mike\s+xxl|mariah\s+carey|messi|metlife|what|can|either|[oi]nto|via|if|hi|one|two|-+|,+|[.%$]+)\b")
+STOP_WORDS_RE = re.compile(r"(?:\b|\A)(the(?:re)?|(?:any|every)body|here|from|an?|i[stn]|[a']re|am|was|we(?:re)|ha[ds]|have|to|with|will|all|each|wh(?:en|ich|re|o|at)(?:ever)?|makes?|making|may|might|i(?:'?m)?|that|the[my]|their|we\'?re|\'?s|through|by|been|this|as|going|do(?:es)?|did|tomorrow|week|today|monday|tuesday|thursday|wednesday|saturday|yesterday|sunday|gives?|about|[bmw]e|y?ou(?:rs?)?|u|some(?:thing|one)?|and|o[fr]|for|\'?(?:ve|d)|us|s?he|on|(?:some)?where|so|[ia]t|it\'?s|gonna|cc|\'?ll|may|take[ns]?|took|how|let|her|hi[ms]|my|(?:an)?other|g[eo]ts?|what|can|either|[oi]nto|via|if|hi|one|november|december|nov|sept|two)(?:\b|\Z)")
+PUNCT_RE = re.compile("(\s|\A|\w)(?:-+|,+|[.%$\"']+)(\s|\Z)")
+NEG_RE = re.compile("(?:\s|\A)(?:has|have|is|was|do|does|need|ca|wo|would)(n'?t)(?:\s|\Z)")
 AMP_RE = re.compile(r"&amp;")
 GT_RE = re.compile(r"&gt;")
 LT_RE = re.compile(r"&lt;")
-DIGIT_RE = re.compile(r"\b[\d:]+(?:[ap]\.?m\.|th|rd|nd|m|b)?\b")
+DIGIT_RE = re.compile(r"\b[\d:]+(?:[ap]\.?m\.?|th|rd|nd|m|b)?\b")
 HTTP_RE = re.compile(r"(?:https?://\S*|\b(?:(?:[\w]{3,5}://?|(?:www|bit)[.]|(?:\w[-\w]+[.])+(?:a(?:ero|sia|[c-gil-oq-uwxz])|b(?:iz|[abd-jmnorstvwyz])|c(?:at|o(?:m|op)|[acdf-ik-orsuvxyz])|d[dejkmoz]|e(?:du|[ceghtu])|f[ijkmor]|g(?:ov|[abd-ilmnp-uwy])|h[kmnrtu]|i(?:n(?:fo|t)|[del-oq-t])|j(?:obs|[emop])|k[eghimnprwyz]|l[abcikr-vy]|m(?:il|obi|useum|[acdeghk-z])|n(?:ame|et|[acefgilopruz])|o(?:m|rg)|p(?:ro|[ae-hk-nrstwy])|qa|r[eosuw]|s[a-eg-or-vxyz]|t(?:(?:rav)?el|[cdfghj-pr])|xxx)\b)(?:[^\s,.:;]|\.\w)*))")
 AT_RE = re.compile(r"(RT\s+)?[.]?@\S+")
 SPACE_RE = re.compile(r"\s\s+")
@@ -66,20 +68,48 @@ def _add_cmn_options(a_parser):
     a_parser.add_argument("files", help = "input files in TSV format", \
                               type = argparse.FileType('r'), nargs = '*', default = [sys.stdin])
 
-def _cleanse(a_line):
+def _safe_sub(a_re, a_sub, a_line):
+    """Perform substitution on line and return it unchanged if line gets empty
+
+    Args:
+    -----
+      a_re - regular expression to substitue
+      a_sub - substitution
+      a_line - line where the substitution should be done
+
+    Returns:
+    --------
+      (str): line with substitutions or unchanged line if it got empty
+
+    """
+    return a_re.sub(a_sub, a_line).strip() or a_line
+
+def _cleanse(a_line, a_topic = ""):
     """Remove spurious elements from line.
 
     @param a_line - line to be cleansed
+    @param (optional) a_topic - topic which the given line pertains to
 
     @return cleansed line
 
     """
-    line = AT_RE.sub("", HTTP_RE.sub("", a_line.lower()))
-    line = AMP_RE.sub("", DIGIT_RE.sub("", line))
+    global TOPIC2RE
+    line = _safe_sub(HTTP_RE, "", a_line.lower())
+    line = _safe_sub(AT_RE, "", line)
+    line = _safe_sub(DIGIT_RE, "", line)
+    line = _safe_sub(AMP_RE, "", line)
+    line = _safe_sub(AMP_RE, "", line)
+    line = _safe_sub(STOP_WORDS_RE, "", line)
+    if a_topic:
+        a_topic = a_topic.lower()
+        if a_topic not in TOPIC2RE:
+            TOPIC2RE[a_topic] = re.compile(r"\b" + SPACE_RE.sub(r"\s+", re.escape(a_topic)) + r"\b")
+        line = _safe_sub(TOPIC2RE[a_topic], "", line)
+    line = _safe_sub(PUNCT_RE, "\\1\\2", line)
+    line = _safe_sub(SPACE_RE, ' ', line)
+    # print("modified line =", repr(line), file = sys.stderr)
     # line = GT_RE.sub(">", LT_RE.sub("<", line))
-    line = STOP_WORDS_RE.sub("", line)
-    line = SPACE_RE.sub(' ', line.strip())
-    print("modified line =", repr(line), file = sys.stderr)
+    # line = NEG_RE.sub(" not ", line)
     # line = POS_RE.sub(POS_CHAR + "\\1", line)
     # line = NEG_RE.sub(NEG_CHAR + "\\1", line)
     return line
@@ -97,7 +127,7 @@ def _iterlines(a_file):
         iline = iline.decode(ENCODING)
         # compute prediction and append it to the list of fields
         ifields = get_fields(iline)
-        ifields[TXT_IDX] = _cleanse(ifields[TXT_IDX])
+        ifields[TXT_IDX] = _cleanse(ifields[TXT_IDX], ifields[TOPIC_IDX])
         yield ifields
 
 def _read_dataset(a_files):
@@ -108,7 +138,7 @@ def _read_dataset(a_files):
     @return list of 2-tuples with input items and their gold classes
 
     """
-    return [([list(w) for w in [''.join(tokenize(ifields[TXT_IDX]))]], ifields[GLD_IDX]) \
+    return [(list(ifields[TXT_IDX]), ifields[GLD_IDX]) \
             for ifile in a_files for ifields in _iterlines(ifile)]
 
 def main():
@@ -128,6 +158,8 @@ tweets according to their sentiment polarity""")
     _add_cmn_options(tr_parser)
     # testing options
     test_parser = subparsers.add_parser(TEST, help = "test the model")
+    test_parser.add_argument("-d", "--debug", help = "output debug information", \
+                             action = "store_true")
     test_parser.add_argument("-v", "--verbose", help = "output scores along with predicted labels",
                              action = "store_true")
     _add_cmn_options(test_parser)
@@ -151,12 +183,14 @@ tweets according to their sentiment polarity""")
         classifier = SentimentClassifier()
         for ifile in args.files:
             for ifields in _iterlines(ifile):
-                y, score = classifier.predict([list(w) for w in \
-                                               [''.join(tokenize(ifields[TXT_IDX]))]])
-                if args.verbose:
-                    ifields.append(str(score))
-                ifields.append(y)
-                print(TAB.join(ifields))
+                if args.debug:
+                    classifier.debug(list(ifields[TXT_IDX]))
+                else:
+                    y, score = classifier.predict(list(ifields[TXT_IDX]))
+                    if args.verbose:
+                        ifields.append(str(score))
+                    ifields.append(y)
+                    print(TAB.join(ifields))
     else:
         raise NotImplementedError
         # for ifile in a_files:

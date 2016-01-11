@@ -21,7 +21,7 @@ from __future__ import print_function, unicode_literals
 # from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
 from evaluate import PRDCT_IDX, TOTAL_IDX
 from cPickle import dump
-from collections import defaultdict, OrderedDict
+from collections import defaultdict, OrderedDict, Counter
 from copy import deepcopy
 from datetime import datetime
 from itertools import chain
@@ -44,8 +44,10 @@ HE_UNIFORM = HeUniform()
 HE_UNIFORM_RELU = HeUniform(gain = np.sqrt(2))
 HE_UNIFORM_LEAKY_RELU = HeUniform(gain = np.sqrt(2./(1+ (RELU_ALPHA or 1e-6)**2)))
 ORTHOGONAL = Orthogonal()
-CORPUS_PROPORTION_MAX = 1.1
-CORPUS_PROPORTION_MIN = 0.55
+CORPUS_PROPORTION_MAX = 0.95
+CORPUS_PROPORTION_MIN = 0.47
+INCR_SAMPLE_AFTER = 40
+BINOMI = 0.93
 
 # default training parameters
 ALPHA = 5e-3
@@ -54,6 +56,8 @@ MAX_ITERS = 1000
 ADADELTA = 0
 SGD = 1
 SVM_C = 1.5
+L1 = 1e-4
+L2 = 1e-5
 
 # default dimension of input vectors
 VEC_DIM = 64
@@ -79,18 +83,38 @@ BEG = "___%BEG%___"
 END = "___%END%___"
 AUX_VEC_KEYS = [EMP, UNK, BEG, END]
 
-# theano options
-# config.allow_gc = True
-# config.scan.allow_gc = True
-
-# theano profiling
-# specify on the command line: THEANO_FLAGS=device=cpu,optimizer_excluding=fusion:inplace
-# config.profile = True
-# config.profile_memory = True
-# config.profile_optimizer = True
-
 ##################################################################
 # Methods
+def _debug_conv(a_seq, a_seq_len, a_emb, a_conv, a_conv_bias, \
+                a_nconv, a_conv_width):
+    """Debug character convolutions.
+
+    Args:
+    -----
+    a_seq: list
+      input characters
+    a_emb: theano.shared(fmatrix)
+      character embeddings
+
+    Returns:
+    --------
+     (void)
+
+    """
+    emb = TT.tensor4(name = "iemb")
+    conv = TT.reshape(TT.nnet.conv.conv2d(emb, a_conv), \
+                      (a_nconv, a_seq_len - a_conv_width + 1)).T
+    conv_max = conv.max(axis = 0) + a_conv_bias
+    conv_amax = conv.argmax(axis = 0)
+    get_conv = theano.function([emb], [conv, conv_max, conv_amax], \
+                               name = "get_conv")
+    conv_out, max_out, amax_out = get_conv(a_emb)
+    for i, j in enumerate(amax_out):
+        print("conv{:d}[{:d}]: {:s} ({:.5f})".format(a_conv_width, i, \
+                                                     ''.join(a_seq[j:j + a_conv_width]),
+                                                                   max_out[0][i]))
+    return max_out[0]
+
 def _floatX(data, a_dtype = config.floatX):
     """Return numpy array populated with the given data.
 
@@ -114,7 +138,7 @@ def _rnd_orth_mtx(a_dim):
     u, _, _ = np.linalg.svd(W)
     return u.astype(config.floatX)
 
-def _balance_ts(a_ts, a_min, a_class2idx):
+def _balance_ts(a_ts, a_min, a_class2idx, icnt, a_binom = False):
     """Obtained samples from trainset with balanced classes.
 
     Args:
@@ -122,19 +146,32 @@ def _balance_ts(a_ts, a_min, a_class2idx):
       (list of 2-tuples) a_ts: original (unbalanced) training set
       (int) a_min: minimum number of instances pertaining to one class
       (set of indices) a_class2idx: mapping from classes to particular indices
+      (int) a_icnt: iteration counter (used to increase sample sizes)
+      (bool) a_binom: use Bernoulli subsampling of training instances
 
     Yields:
     -------
       2-tuples sampled from a balanced set
 
     """
-    samples = [i for v in a_class2idx.itervalues() \
-               for i in np.random.choice(v, min(CORPUS_PROPORTION_MAX * a_min, \
-                                                CORPUS_PROPORTION_MIN * len(v)), \
-                                         replace = False)]
+    ibinom = iseq = None
+    samples = [i for v in a_class2idx.itervalues() for i in v]
+    # clever sub-sampling (would probably work with SGD but does not work with AdaDelta)
+    # icnt // INCR_SAMPLE_AFTER + 1
+    # [i for v in a_class2idx.itervalues() for i in \
+        # np.random.choice(v, min(float((icnt + 1) * 0.5) * CORPUS_PROPORTION_MAX * a_min, \
+        #                               (float(icnt)/(icnt + 1.)) * len(v)), \
+        #                           replace = False)]
     np.random.shuffle(samples)
     for i in samples:
-        yield a_ts[i]
+        if a_binom:
+            iseq = []
+            for iword in a_ts[i][0]:
+                ibinom = np.random.binomial(1, BINOMI, len(iword))
+                iseq.append([x for x, b in zip(iword, ibinom) if b])
+            yield (np.asarray(iseq, dtype = "int32"), a_ts[i][-1])
+        else:
+            yield a_ts[i]
 
 def _get_minibatches_idx(idx_list, n, mb_size, shuffle = True):
     """Shuffle the dataset at each iteration.
@@ -167,11 +204,13 @@ def _get_minibatches_idx(idx_list, n, mb_size, shuffle = True):
 def adadelta(tparams, grads, x, y, cost):
     """An adaptive learning rate optimizer
 
-    @param tpramas - model parameters
-    @param grads - gradients of cost w.r.t to parameres
-    @param x - model inputs
-    @param y - targets
-    @param cost - objective function to minimize
+    Args:
+    -----
+    tpramas: model parameters
+    grads: gradients of cost w.r.t to parameres
+    x: model inputs
+    y: targets
+    cost: objective function to minimize
 
     Notes
     -----
@@ -207,7 +246,6 @@ def adadelta(tparams, grads, x, y, cost):
     f_update = theano.function([], [], updates = ru2up + param_up,
                                on_unused_input = "ignore",
                                name = "adadelta_f_update")
-
     return f_grad_shared, f_update
 
 ##################################################################
@@ -248,8 +286,6 @@ class RNNModel(object):
         self.int2lbl = dict()
         self.int2coeff = dict()
         self.feat2idx = dict()
-        # self.alpha = ALPHA
-        # self.optimizer = ADADELTA
         # NN parameters to be learned
         self._params = []
         # private prediction function
@@ -261,10 +297,8 @@ class RNNModel(object):
         self.CONV2_OUT = self.CONV3_OUT = self.CONV4_OUT = None
         # max-sample output of convolutional layers
         self.CONV2_MAX_OUT = self.CONV3_MAX_OUT = self.CONV4_MAX_OUT = self.CONV_MAX_OUT = None
-        # custom recurrence function (hiding LSTM)
-        # self._recurrence = None
         # map from hidden layer to output and bias for the output layer
-        self.LSTM2Y = self.Y_BIAS = self.Y = None
+        self.CMO2Y = self.Y_BIAS = self.Y = None
         # the remianing parameters will be initialized immediately
         self._init_params()
 
@@ -291,55 +325,84 @@ class RNNModel(object):
         labels = set()
         featset = set()
         self.max_len = 0
-        for wlist, lbl in a_trainset:
+        for w, lbl in a_trainset:
             labels.add(lbl)
-            for w in wlist:
-                featset.update(w)
-                # append auxiliary items to training instances
-                w[:0] = [BEG]; w.append(END)
-                self.max_len = max(self.max_len, len(w))
+            featset.update(w)
+            # append auxiliary items to training instances
+            w[:0] = [BEG]; w.append(END)
+            self.max_len = max(self.max_len, len(w))
         self.V = len(AUX_VEC_KEYS) + len(featset)
         del featset
         self.n_labels = len(labels)
 
         # initialize embedding matrix for features
         self._init_emb()
+        # convert symbolic features in the trainset to indices
+        a_trainset = self._digitize_feats(a_trainset, a_add = True)
+        # store indices of particular classes in the training set to ease the
+        # sampling
+        class2indices = defaultdict(list)
+        for i, (_, y_i) in enumerate(a_trainset):
+            class2indices[y_i].append(i)
+        # order instances according to their class indices
+        n_items = [len(i) for _, i in sorted(class2indices.iteritems(), \
+                                             key = lambda k: k[0])]
+        total_items = float(sum(n_items))
+        # get the minimum number of instances per class
+        min_items = min(n_items)
+        # due to unbalanced classes, we have to introduce error coefficients
+        err_coeff = [(1. - float(c_i)/total_items) for c_i in n_items]
+        self.ERR_COEFF = theano.shared(value = _floatX(err_coeff) , name = "CONV_COEFF")
 
         # initialize LSTM layer
-        lstm_out, hw2_carry_out = self._init_lstm()
+        cmo_out, hw2_carry_out = self._emb2conv(self.CHAR_INDICES)
         # initialize dropout layer
-        # activation handle for the dropout layer
         # dropout_out = self._init_dropout(lstm_out[-1])
-        dropout_out = self.LSTM_COEFF * lstm_out * \
-                      self.CONV_COEFF * TT.nnet.sigmoid(hw2_carry_out)
+        cmo = self.CMO_COEFF * cmo_out + self.CONV_COEFF * TT.nnet.sigmoid(hw2_carry_out)
+
+        # self.LSTM2I = theano.shared(value = HE_NORMAL.sample((self.n_cmo, self.n_cmo)), \
+        #                             name = "LSTM2I")
+        # # output bias
+        # self.I_BIAS = theano.shared(value = HE_NORMAL.sample((1, self.n_cmo)).flatten(), \
+        #                             name = "I_BIAS")
+        # # output layer
+        # intermediate = TT.tanh(TT.dot(dropout_out, self.LSTM2I) + self.I_BIAS)
+
+        # # add newly initialized weights to the parameters to be trained
+        # self._params += [self.LSTM2I, self.I_BIAS]
 
         # LSTM debug function
         # lstm_debug = theano.function([self.W_INDICES], lstm_out, name = "lstm_debug")
 
         # mapping from the LSTM layer to output
-        self.LSTM2Y = theano.shared(value = HE_NORMAL.sample((self.n_lstm, self.n_labels)), \
-                                    name = "LSTM2Y")
+        self.CMO2Y = theano.shared(value = HE_NORMAL.sample((self.n_cmo, self.n_labels)), \
+                                    name = "CMO2Y")
         # output bias
         self.Y_BIAS = theano.shared(value = HE_NORMAL.sample((1, self.n_labels)).flatten(), \
                                     name = "Y_BIAS")
         # output layer
-        self.Y = TT.nnet.softmax(TT.dot(dropout_out, self.LSTM2Y) + self.Y_BIAS)
+        self.Y = TT.nnet.softmax(TT.dot(cmo, self.CMO2Y) + self.Y_BIAS)
 
         # add newly initialized weights to the parameters to be trained
-        self._params += [self.LSTM2Y, self.Y_BIAS]
+        self._params += [self.CMO2Y, self.Y_BIAS]
 
         # correct label
         y = TT.scalar('y', dtype = "int32")
 
         # cost gradients and updates
-        cost = -TT.log(self.Y[0, y])
+        cost = -TT.log(self.Y[0, y]) \
+               + L2 * TT.sum([TT.sum(p ** 2) for p in self._params])
+
+        # Alternative cost functions:
         # cost = self.Y.sum() - 2 * self.Y[0, y]
         # cost = 0.5 * ((self.LSTM2Y ** 2).sum() + (self.Y_BIAS ** 2).sum()) + \
         #        SVM_C * (TT.max(1 - self.Y * y, 0) ** 2).sum()
+
+        # AdaDelta:
         gradients = TT.grad(cost, wrt = self._params)
         # define training function and let the training begin
         f_grad_shared, f_update = adadelta(self._params, gradients, \
-                                           self.W_INDICES, y, cost)
+                                           self.CHAR_INDICES, y, cost)
         # SGD:
         # alpha = TT.scalar("alpha")
         # f_grad = theano.function([self.W_INDICES, y], gradients, name = "f_grad")
@@ -350,16 +413,12 @@ class RNNModel(object):
         # Predictions:
         y_pred = TT.argmax(self.Y, axis = 1)
         # prediction function
-        _predict = theano.function([self.W_INDICES], \
-                                   [y_pred], \
-                                   name = "predict")
+        _predict = theano.function([self.CHAR_INDICES], [y_pred], name = "predict")
 
-        class2indices = defaultdict(list)
-        for i, (_, y_i) in enumerate(a_trainset):
-            class2indices[y_i].append(i)
-        min_items = min([len(i) for i in class2indices.itervalues()])
-        a_trainset = self._digitize_feats(a_trainset)
         if a_devset is not None:
+            for w, _ in a_devset:
+                # append auxiliary items to training instances
+                w[:0] = [BEG]; w.append(END)
             a_devset = self._digitize_feats(a_devset)
             # initialize and populate rho statistics
             rhostat = defaultdict(lambda: [0, 0])
@@ -372,17 +431,25 @@ class RNNModel(object):
         idx_list = np.arange(N, dtype="int32")
         mb_size = max(N // 10, 1)
 
+        dev_stat = None
         dev_score = max_dev_score = -INF
         if a_devset is None:
             max_dev_score = dev_score = 0.
         icost = prev_cost = min_train_cost = INF
+        print("lbl2int =", repr(self.lbl2int), file = sys.stderr)
         for i in xrange(MAX_ITERS):
             icost = 0.
             start_time = datetime.utcnow()
             # iterate over the training instances
-            for x_i, y_i in _balance_ts(a_trainset, min_items, class2indices):
-                icost += f_grad_shared(x_i, y_i)
-                f_update()
+            for x_i, y_i in _balance_ts(a_trainset, min_items, class2indices, i):
+                try:
+                    icost += f_grad_shared(x_i, y_i)
+                    f_update()
+                except:
+                    print("self.feat2idx =", repr(self.feat2idx), file = sys.stderr)
+                    print("x_i =", repr(x_i), file = sys.stderr)
+                    print("y_i =", repr(y_i), file = sys.stderr)
+                    raise
             # dump the best model
             if icost < min_train_cost:
                 # dump trained model to disc, if no development set was supplied
@@ -397,9 +464,10 @@ class RNNModel(object):
                 # compute rho statistics anew
                 for x_i, y_i in a_devset:
                     rhostat[y_i][PRDCT_IDX] += (_predict(x_i)[0] == y_i)
-                dev_score = sum([float(v[PRDCT_IDX])/float(v[TOTAL_IDX] or 1.) \
-                                for v in rhostat.itervalues()]) / \
-                                    float(len(rhostat) or 1)
+                dev_stat = [float(v[PRDCT_IDX])/float(v[TOTAL_IDX] or 1.) \
+                            for v in rhostat.itervalues()]
+                dev_score = sum(dev_stat) / float(len(rhostat) or 1)
+                print("dev_stat =", repr(dev_stat), file = sys.stderr)
                 if dev_score > max_dev_score:
                     self._dump(a_path)
                     max_dev_score = dev_score
@@ -413,8 +481,8 @@ class RNNModel(object):
             if prev_cost != INF and 0. <= (prev_cost - icost) < EPSILON:
                 break
             prev_cost = icost
-        print("Minimum train cost = {:.10f}, dev score = {:.10f}".format(min_train_cost, \
-                                                                         max_dev_score))
+        print("Minimum train cost = {:.10f}, maximum dev score = {:.10f}".format(min_train_cost, \
+                                                                                 max_dev_score))
         return icost
 
     def predict(self, a_seq):
@@ -425,31 +493,96 @@ class RNNModel(object):
         @return 2-tuple with predicted label and its assigned score
 
         """
-        if self._predict is None:
-            # deactivate dropout when using the model
-            self.use_dropout.set_value(0.)
-            y_pred = TT.argmax(self.Y, axis = 1)
-            # prediction function
-            _dp = printing.Print("self.Y =")
-            _dp_Y = _dp(self.Y)
-            _dp = printing.Print("y_pred =")
-            _dp_Y_pred = _dp(y_pred)
-            self._debug_print_Y = theano.function([self.W_INDICES], [_dp_Y, _dp_Y_pred], \
-                                             name = "debug_print")
-            self._predict = theano.function([self.W_INDICES], \
-                                            [y_pred, self.Y[0, y_pred]], \
-                                            name = "predict")
-        # self._debug_print_Y(self._feat2idcs(a_seq))
+        a_seq[:0] = [BEG]; a_seq.append(END)
+        self._activate_predict()
         y, score = self._predict(self._feat2idcs(a_seq))
         return (self.int2lbl[int(y)], score)
 
-    def _digitize_feats(self, a_trainset):
+    def debug(self, a_seq):
+        """Output verbose information in prediction.
+
+        Args:
+        -----
+        a_seq (matrix): row matrix of words represented as char index vectors
+
+        Returns:
+        --------
+        (TT.vector): convolution vector
+
+        """
+        a_seq[:0] = [BEG]; a_seq.append(END)
+        a_dseq = self._feat2idcs(a_seq)
+        # output embeddings
+        in_len = len(a_dseq)
+        emb = self.EMB[self.CHAR_INDICES]
+        d_emb = printing.Print("EMB =")(emb)
+        debug_emb = theano.function([self.CHAR_INDICES], [d_emb], name = "debug_emb")
+        print("*** EMBEDDINGS ***")
+        debug_emb(a_dseq)
+
+        # output convolutions
+        ee = emb.reshape((1, 1, in_len, self.vdim))
+        get_ee = theano.function([self.CHAR_INDICES], [ee], name = "get_ee")
+        eemb = get_ee(a_dseq)[0]
+        print("*** CONVOLUTIONS(2) ***")
+        conv2_out = _debug_conv(a_seq, in_len, eemb, self.CONV2, self.CONV2_BIAS, \
+                                self.n_conv2, self.conv2_width)
+        print("*** CONVOLUTIONS(3) ***")
+        conv3_out = _debug_conv(a_seq, in_len, eemb, self.CONV3, self.CONV3_BIAS, \
+                                self.n_conv3, self.conv3_width)
+        print("*** CONVOLUTIONS(4) ***")
+        conv4_out = _debug_conv(a_seq, in_len, eemb, self.CONV4, self.CONV4_BIAS, \
+                                self.n_conv4, self.conv4_width)
+        print("*** CONVOLUTIONS(5) ***")
+        conv5_out = _debug_conv(a_seq, in_len, eemb, self.CONV5, self.CONV5_BIAS, \
+                                self.n_conv5, self.conv5_width)
+
+        # output highways
+        print("conv2_out = ", repr(conv2_out), file = sys.stderr)
+        print("conv3_out = ", repr(conv3_out), file = sys.stderr)
+        conv_max_out = np.concatenate((conv2_out, conv3_out, conv4_out, conv5_out))
+        print("conv_max_out = ", repr(conv_max_out), file = sys.stderr)
+        cmo = TT.vector(name = "cmo")
+        hw2_trans = TT.nnet.hard_sigmoid(TT.dot(cmo, self.HW2_TRANS) + self.HW2_TRANS_BIAS)
+        hw2_carry = TT.nnet.relu(cmo * (1. - hw2_trans), alpha = RELU_ALPHA)
+        d_hw2_trans = printing.Print("HW2_TRANS =")(hw2_trans)
+        debug_hw2_trans = theano.function([cmo], [d_hw2_trans], name = "debug_hw2_trans")
+        print("*** HW2 TRANS ***")
+        debug_hw2_trans(conv_max_out)
+        d_hw2_carry = printing.Print("HW2_CARRY =")(hw2_carry)
+        debug_hw2_carry = theano.function([cmo], [d_hw2_carry], name = "debug_hw2_carry")
+        print("*** HW2 CARRY ***")
+        debug_hw2_carry(conv_max_out)
+        print("*** HW OUT ***")
+        hw_out = TT.dot(hw2_trans, self.CMO_W) + self.CMO_BIAS
+        d_hw_out = printing.Print("HW_OUT =")(hw_out)
+        debug_hw_out = theano.function([cmo], [d_hw_out], name = "debug_hw_out")
+        debug_hw_out(conv_max_out)
+        print("*** PRE_Y ***")
+        pre_y = self.CMO_COEFF * hw_out + self.CONV_COEFF * TT.nnet.sigmoid(hw2_carry)
+        d_pre_y = printing.Print("HW_OUT =")(pre_y)
+        debug_pre_y = theano.function([cmo], [d_pre_y], name = "debug_pre_y")
+        debug_pre_y(conv_max_out)
+
+        # output predictions
+        self._activate_predict()
+        y, score = self._predict(self._feat2idcs(a_seq))
+        print("y =", repr(self.int2lbl[int(y)]), file = sys.stderr)
+        print("score =", repr(score), file = sys.stderr)
+
+
+    def _digitize_feats(self, a_trainset, a_add = False):
         """Convert features and target classes to vectors and ints.
 
-        @param a_trainset - training set as a list of 2-tuples with
-                            training instances and classes
+        Args:
+        -----
+        a_trainset (set): training set as a list of 2-tuples with training
+                            instances and classes
+        a_add (bool): create indices for new features
 
-        @return new list of digitized features and classes
+        Returns:
+        --------
+          (list): new list of digitized features and classes
 
         """
         assert self.n_labels > 0, "Invalid number of labels."
@@ -479,7 +612,7 @@ class RNNModel(object):
                 dlabel = dint
             # convert features to indices and append new training
             # instance
-            ret.append((np.asarray(self._feat2idcs(iseq, a_add = True), \
+            ret.append((np.asarray(self._feat2idcs(iseq, a_add = a_add), \
                                    dtype = "int32"), dlabel))
         return ret
 
@@ -494,28 +627,21 @@ class RNNModel(object):
 
         """
         # initialize matrix of feature indices
-        ditems = []
+        findices = []
         # convert features to vector indices
-        feat_idcs = None
         cfeats = len(self.feat2idx)
         # determine maximum word length in sequence
-        max_len = max(max([len(w) for w in a_seq]), self.conv2_width, \
-                      self.conv3_width, self.conv4_width)
-        ilen = 0
-        for iword in a_seq:
-            feat_idcs = []
-            # append auxiliary items
-            ilen = len(iword)
-            for ichar in iword:
-                if a_add and ichar not in self.feat2idx:
-                    self.feat2idx[ichar] = cfeats
-                    cfeats += 1
-                feat_idcs.append(self.feat2idx.get(ichar, UNK))
-            # pad indices with embeddings for empty character
-            if ilen < max_len:
-                feat_idcs += [self.feat2idx[EMP]] * (max_len - ilen)
-            ditems.append(feat_idcs)
-        return ditems
+        ilen = len(a_seq)
+        max_len = max(ilen, self.conv2_width, self.conv3_width, \
+                      self.conv4_width, self.conv5_width)
+        for ichar in a_seq:
+            if a_add and ichar not in self.feat2idx:
+                self.feat2idx[ichar] = cfeats
+                cfeats += 1
+            findices.append(self.feat2idx.get(ichar, UNK))
+        if ilen < max_len:
+            findices += [self.feat2idx[EMP]] * (max_len - ilen)
+        return findices
 
     def _init_params(self):
         """Initialize parameters which are independent of the training data.
@@ -525,8 +651,8 @@ class RNNModel(object):
         """
         # auxiliary zero matrix used for padding the input
         self._subzero = TT.zeros((self.max_conv_len, self.vdim))
-        # matrix of char vectors, corresponding to single word
-        self.W_INDICES = TT.imatrix(name = "W_INDICES")
+        # # matrix of char vectors, corresponding to single word
+        # self.W_INDICES = TT.imatrix(name = "W_INDICES")
         # matrix of char vectors, corresponding to single word
         self.CHAR_INDICES = TT.ivector(name = "CHAR_INDICES")
         # number of embeddings per training item
@@ -556,56 +682,72 @@ class RNNModel(object):
         self.CONV3_BIAS = theano.shared(value = HE_NORMAL.sample((1, self.n_conv3)), \
                                         name = "CONV3_BIAS")
         # five convolutional filters for strides of width 4
-        self.n_conv4 = 17 # number of filters
+        self.n_conv4 = 15 # number of filters
         self.conv4_width = 4 # width of stride
         self.CONV4 = theano.shared(value = HE_NORMAL.sample((self.n_conv4, 1, \
                                                              self.conv4_width, self.vdim)), \
                                    name = "CONV4")
         self.CONV4_BIAS = theano.shared(value = HE_NORMAL.sample((1, self.n_conv4)), \
                                         name = "CONV4_BIAS")
+        # five convolutional filters for strides of width 4
+        self.n_conv5 = 15 # number of filters
+        self.conv5_width = 5 # width of stride
+        self.CONV5 = theano.shared(value = HE_NORMAL.sample((self.n_conv5, 1, \
+                                                             self.conv5_width, self.vdim)), \
+                                   name = "CONV5")
+        self.CONV5_BIAS = theano.shared(value = HE_NORMAL.sample((1, self.n_conv5)), \
+                                        name = "CONV5_BIAS")
         # remember parameters to be learned
-        self._params += [self.CONV2, self.CONV3, self.CONV4, \
-                         self.CONV2_BIAS, self.CONV3_BIAS, self.CONV4_BIAS]
+        self._params += [self.CONV2, self.CONV3, self.CONV4, self.CONV5, \
+                         self.CONV2_BIAS, self.CONV3_BIAS, self.CONV4_BIAS, self.CONV5_BIAS]
         ############
         # Highways #
         ############
-        self.n_lstm = self.n_conv2 + self.n_conv3 + self.n_conv4
+        self.n_cmo = self.n_conv2 + self.n_conv3 + self.n_conv4 + self.n_conv5
         # the 1-st highway links character embeddings to the output
         # self.HW1_TRANS_COEFF = theano.shared(value = _floatX(0.75) , name = "HW1_TRANS_COEFF")
-        # self.HW1_TRANS = theano.shared(value = HE_UNIFORM_RELU.sample((self.vdim, self.n_lstm)), \
+        # self.HW1_TRANS = theano.shared(value = HE_UNIFORM_RELU.sample((self.vdim, self.n_cmo)), \
         #                                name = "HW1_TRANS")
         # self.HW1_TRANS_BIAS = theano.shared(value = \
-        #                                     HE_UNIFORM_RELU.sample((1, self.n_lstm)).flatten(), \
+        #                                     HE_UNIFORM_RELU.sample((1, self.n_cmo)).flatten(), \
         #                                     name = "HW1_TRANS_BIAS")
         # self._params += [self.HW1_TRANS_COEFF, self.HW1_TRANS, self.HW1_TRANS_BIAS]
         # the 2-nd highway links convolutions to the output
-        self.HW2_TRANS = theano.shared(value = HE_UNIFORM.sample((self.n_lstm, self.n_lstm)), \
+        self.HW2_TRANS = theano.shared(value = HE_UNIFORM.sample((self.n_cmo, self.n_cmo)), \
                                        name = "HW2_TRANS")
         self.HW2_TRANS_BIAS = theano.shared(value = \
-                                            HE_UNIFORM.sample((1, self.n_lstm)).flatten(), \
+                                            HE_UNIFORM.sample((1, self.n_cmo)).flatten(), \
                                             name = "HW2_TRANS_BIAS")
         self._params += [self.HW2_TRANS, self.HW2_TRANS_BIAS]
-        ########
-        # LSTM #
-        ########
-        self.LSTM_W = theano.shared(value = np.hstack((_rnd_orth_mtx(self.n_lstm) \
-                                                                for _ in xrange(4))), \
-                                    name = "LSTM_W")
-        self.LSTM_U = theano.shared(value = np.hstack([_rnd_orth_mtx(self.n_lstm) \
-                                                            for _ in xrange(4)]), \
-                                    name = "LSTM_U")
+        #######
+        # CMO #
+        #######
+        self.CMO_W = theano.shared(value = _rnd_orth_mtx(self.n_cmo), name = "CMO_W")
 
-        self.LSTM_BIAS = theano.shared(HE_NORMAL.sample((1, self.n_lstm * 4)).flatten(), \
-                                       name = "LSTM_BIAS")
-        self._params += [self.LSTM_W, self.LSTM_U, self.LSTM_BIAS]
+        self.CMO_BIAS = theano.shared(HE_NORMAL.sample((1, self.n_cmo)).flatten(), \
+                                       name = "CMO_BIAS")
+        self._params += [self.CMO_W, self.CMO_BIAS]
+        # ########
+        # # LSTM #
+        # ########
+        # self.LSTM_W = theano.shared(value = np.hstack((_rnd_orth_mtx(self.n_lstm) \
+        #                                                         for _ in xrange(4))), \
+        #                             name = "LSTM_W")
+        # self.LSTM_U = theano.shared(value = np.hstack([_rnd_orth_mtx(self.n_lstm) \
+        #                                                     for _ in xrange(4)]), \
+        #                             name = "LSTM_U")
+
+        # self.LSTM_BIAS = theano.shared(HE_NORMAL.sample((1, self.n_lstm * 4)).flatten(), \
+        #                                name = "LSTM_BIAS")
+        # self._params += [self.LSTM_W, self.LSTM_U, self.LSTM_BIAS]
         ################
         # Coefficients #
         ################
         # self.EMB_COEFF = theano.shared(value = _floatX(0.25) , name = "EMB_COEFF")
         self.CONV_COEFF = theano.shared(value = _floatX(0.5) , name = "CONV_COEFF")
-        self.LSTM_COEFF = theano.shared(value = _floatX(1.) , name = "LSTM_COEFF")
+        self.CMO_COEFF = theano.shared(value = _floatX(1.) , name = "CMO_COEFF")
 
-        self._params += [self.CONV_COEFF, self.LSTM_COEFF]
+        self._params += [self.CONV_COEFF, self.CMO_COEFF]
         ###########
         # DROPOUT #
         ###########
@@ -658,59 +800,64 @@ class RNNModel(object):
         conv4_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV4), \
                                (self.n_conv4, in_len - self.conv4_width + 1)).T
         conv4_max_out = conv4_out.max(axis = 0) + self.CONV4_BIAS
+        # width-5 convolutions
+        conv5_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV5), \
+                               (self.n_conv5, in_len - self.conv5_width + 1)).T
+        conv5_max_out = conv5_out.max(axis = 0) + self.CONV5_BIAS
         # output convolutions
         conv_max_out = TT.concatenate([conv2_max_out, conv3_max_out, \
-                                       conv4_max_out], axis = 1)
+                                       conv4_max_out, conv5_max_out], axis = 1)
         hw2_trans = TT.nnet.hard_sigmoid(TT.dot(conv_max_out[0,:], self.HW2_TRANS) + \
                                         self.HW2_TRANS_BIAS)
         hw2_carry = TT.nnet.relu(conv_max_out[0,:] * (1. - hw2_trans), alpha = RELU_ALPHA)
         # lstm_in = TT.dot(conv_max_out[0,:], self.LSTM_W) + self.LSTM_BIAS
-        lstm_in = TT.dot(hw2_trans, self.LSTM_W) + self.LSTM_BIAS
-        return lstm_in, hw2_carry
+        cmo = TT.dot(hw2_trans, self.CMO_W) + self.CMO_BIAS
+        return cmo, hw2_carry
 
-    def _init_lstm(self):
-        """Initialize parameters of LSTM layer.
+    # def _init_lstm(self):
+    #     """Initialize parameters of LSTM layer.
 
-        @return 2-tuple with result and updates of LSTM scan
+    #     @return 2-tuple with result and updates of LSTM scan
 
-        """
-        # single LSTM recurrence step function
-        def _lstm_step(x_, o_, m_, c2_):
-            """Single LSTM recurrence step.
+    #     """
+    #     # single LSTM recurrence step function
+    #     def _lstm_step(x_, o_, m_, c2_):
+    #         """Single LSTM recurrence step.
 
-            @param x_ - indices of input characters
-            @param o_ - previous output
-            @param m_ - previous state of memory cell
-            @param c1_ - highway carry (from embeddings)
-            @param c2_ - highway carry (from convolutions)
+    #         @param x_ - indices of input characters
+    #         @param o_ - previous output
+    #         @param m_ - previous state of memory cell
+    #         @param c1_ - highway carry (from embeddings)
+    #         @param c2_ - highway carry (from convolutions)
 
-            @return 2-tuple (with the output and memory cells)
+    #         @return 2-tuple (with the output and memory cells)
 
-            """
-            # obtain character convolutions for input indices
-            lstm_in, hw2_carry = self._emb2conv(x_)
-            # compute common term for all LSTM components
-            proxy = TT.nnet.sigmoid(lstm_in + TT.dot(o_, self.LSTM_U))
-            # input
-            i = proxy[:self.n_lstm]
-            # forget
-            f = proxy[self.n_lstm:2*self.n_lstm]
-            # output
-            o = proxy[2*self.n_lstm:3*self.n_lstm]
-            # new state of memory cell (input * current + forget * previous)
-            m = i * TT.tanh(proxy[3*self.n_lstm:]) + f * m_
-            # new outout state
-            o = o * TT.tanh(m)
-            # return new output and memory state
-            return o, m, hw2_carry
-        # `scan' function
-        res, _ = theano.scan(_lstm_step,
-                             sequences = [self.W_INDICES],
-                             outputs_info = [np.zeros(self.n_lstm).astype(config.floatX),
-                                             np.zeros(self.n_lstm).astype(config.floatX),
-                                             np.zeros(self.n_lstm).astype(config.floatX)],
-                                   name = "_lstm_layers")
-        return (res[0], res[-1])
+    #         """
+    #         # obtain character convolutions for input indices
+    #         lstm_in, hw2_carry = self._emb2conv(x_)
+    #         # compute common term for all LSTM components
+    #         proxy = TT.nnet.sigmoid(lstm_in + TT.dot(o_, self.LSTM_U))
+    #         # input
+    #         i = proxy[:self.n_lstm]
+    #         # forget
+    #         f = proxy[self.n_lstm:2*self.n_lstm]
+    #         # output
+    #         o = proxy[2*self.n_lstm:3*self.n_lstm]
+    #         # new state of memory cell (input * current + forget * previous)
+    #         m = i * TT.tanh(proxy[3*self.n_lstm:]) + f * m_
+    #         # new outout state
+    #         o = o * TT.tanh(m)
+    #         # return new output and memory state
+    #         return o, m, hw2_carry
+    #     # `scan' function
+    #     res, _ = theano.scan(_lstm_step,
+    #                          sequences = [self.W_INDICES],
+    #                          outputs_info = [np.zeros(self.n_lstm).astype(config.floatX),
+    #                                          np.zeros(self.n_lstm).astype(config.floatX),
+    #                                          np.zeros(self.n_lstm).astype(config.floatX)],
+    #                                name = "_lstm_layers")
+    #     # lstm_in, hw2_carry = self._emb2conv(self.W_INDICES[0])
+    #     return (res[0], res[-1])
 
     def _init_dropout(self, a_input):
         """Create a dropout layer.
@@ -731,6 +878,22 @@ class RNNModel(object):
                                                     dtype = a_input.dtype)),
                            a_input * 0.5)
         return output
+
+    def _activate_predict(self):
+        """Activate prediction function.
+
+        Returns:
+        --------
+        void
+
+        """
+        if self._predict is None:
+            # deactivate dropout when using the model
+            self.use_dropout.set_value(0.)
+            y_pred = TT.argmax(self.Y, axis = 1)
+            self._predict = theano.function([self.CHAR_INDICES], \
+                                            [y_pred, self.Y[0, y_pred]], \
+                                            name = "predict")
 
     def _dump(self, a_path):
         """Dump this model to disc at the given path.

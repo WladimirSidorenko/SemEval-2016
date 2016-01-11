@@ -49,6 +49,7 @@ PRDCT_IDX = DIFF_IDX
 
 GLD_IDX = 2
 TXT_IDX = 3
+TOPIC_IDX = 0
 
 ##################################################################
 # Methods
@@ -129,6 +130,9 @@ def evaluate(a_ifile, a_verbose = False, a_get_fields = get_fields):
     micro_MAE /= float(sum([ttl for ttl, _ in cstat.itervalues()])) or 1.
     rho_pn = sum([float(v[PRDCT_IDX])/float(v[TOTAL_IDX] or 1) for v in rhostat.itervalues()]) / \
              float(len(rhostat) or 1)
+    print("rhostat {0: 'negative', 1: 'positive'} = ", \
+          repr([float(v[PRDCT_IDX])/float(v[TOTAL_IDX] or 1) for v in \
+                rhostat.itervalues()]), file = sys.stderr)
     return (macro_MAE, micro_MAE, rho_pn, accuracy)
 
 def main():
