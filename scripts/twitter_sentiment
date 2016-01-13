@@ -40,8 +40,8 @@ NEG_CHAR = ''
 TOPIC2RE = {}
 POS_RE = re.compile(r"[\b\A](amazing|better|best|cool||fun|fant|good|great|like|love|luv|wow|wonder\b|:\))")
 
-STOP_WORDS_RE = re.compile(r"(?:\b|\A)(the(?:re)?|(?:any|every)body|here|from|an?|i[stn]|[a']re|am|was|we(?:re)|ha[ds]|have|to|with|will|all|each|wh(?:en|ich|re|o|at)(?:ever)?|makes?|making|may|might|i(?:'?m)?|that|the[my]|their|we\'?re|\'?s|through|by|been|this|as|going|do(?:es)?|did|tomorrow|week|today|monday|tuesday|thursday|wednesday|saturday|yesterday|sunday|gives?|about|[bmw]e|y?ou(?:rs?)?|u|some(?:thing|one)?|and|o[fr]|for|\'?(?:ve|d)|us|s?he|on|(?:some)?where|so|[ia]t|it\'?s|gonna|cc|\'?ll|may|take[ns]?|took|how|let|her|hi[ms]|my|(?:an)?other|g[eo]ts?|what|can|either|[oi]nto|via|if|hi|one|november|december|nov|sept|two)(?:\b|\Z)")
-PUNCT_RE = re.compile("(\s|\A|\w)(?:-+|,+|[.%$\"']+)(\s|\Z)")
+STOP_WORDS_RE = re.compile(r"\b(the(?:re)?|(?:any|every)body|here|from|an?|i[stn]|[a']re|am|was|we(?:re)|ha[ds]|have|to|with|will|all|each|wh(?:en|ich|ere|o|at)(?:ever)?|makes?|making|may|might|i(?:'?m)?|that|the[my]|their|we\'?re|\'?s|through|by|be(?:en|ing)?|this|as|going|do(?:es)?|did|tomorrow|week|today|monday|tuesday|thursday|wednesday|saturday|yesterday|sunday|gives?|about|[bmw]e|y?ou(?:rs?)?|u|some(?:thing|one)?|and|o[fr]|for|\'?(?:ve|d)|us|s?he|on|(?:some)?where|so|[ia]t|it\'?s|gonna|cc|\'?ll|may|take[ns]?|took|how|let|her|hi[ms]|my|(?:an)?other|g[eo]ts?|while|can|either|[oi]nto|via|if|hi|one|september|october|january|june|july|november|december|nov|sept|two)(?=\s|\Z)")
+PUNCT_RE = re.compile("(\s|\A|\w)(?:-+|,+|:+|[.%$\"']+)(\s|\Z)")
 NEG_RE = re.compile("(?:\s|\A)(?:has|have|is|was|do|does|need|ca|wo|would)(n'?t)(?:\s|\Z)")
 AMP_RE = re.compile(r"&amp;")
 GT_RE = re.compile(r"&gt;")
@@ -99,7 +99,7 @@ def _cleanse(a_line, a_topic = ""):
     line = _safe_sub(DIGIT_RE, "", line)
     line = _safe_sub(AMP_RE, "", line)
     line = _safe_sub(AMP_RE, "", line)
-    line = _safe_sub(STOP_WORDS_RE, "", line)
+    line = _safe_sub(STOP_WORDS_RE, " ", line)
     if a_topic:
         a_topic = a_topic.lower()
         if a_topic not in TOPIC2RE:

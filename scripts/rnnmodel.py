@@ -44,23 +44,26 @@ HE_UNIFORM = HeUniform()
 HE_UNIFORM_RELU = HeUniform(gain = np.sqrt(2))
 HE_UNIFORM_LEAKY_RELU = HeUniform(gain = np.sqrt(2./(1+ (RELU_ALPHA or 1e-6)**2)))
 ORTHOGONAL = Orthogonal()
+
+# corpus sampling
+BINOMI = 0.93
 CORPUS_PROPORTION_MAX = 0.95
 CORPUS_PROPORTION_MIN = 0.47
-INCR_SAMPLE_AFTER = 40
-BINOMI = 0.93
+RESAMPLE_AFTER = 75
+INCR_SAMPLE_AFTER = 150
+MAX_ITERS = 1500
 
 # default training parameters
 ALPHA = 5e-3
 EPSILON = 1e-5
-MAX_ITERS = 1000
 ADADELTA = 0
 SGD = 1
-SVM_C = 1.5
+SVM_C = 0.5
 L1 = 1e-4
 L2 = 1e-5
 
 # default dimension of input vectors
-VEC_DIM = 64
+VEC_DIM = 32
 # default context window
 
 # initial parameters for uniform distribution
@@ -85,35 +88,33 @@ AUX_VEC_KEYS = [EMP, UNK, BEG, END]
 
 ##################################################################
 # Methods
-def _debug_conv(a_seq, a_seq_len, a_emb, a_conv, a_conv_bias, \
-                a_nconv, a_conv_width):
+def _debug_conv(a_seq, a_conv_width, a_conv, a_conv_max):
     """Debug character convolutions.
 
     Args:
     -----
     a_seq: list
       input characters
-    a_emb: theano.shared(fmatrix)
-      character embeddings
+    a_conv_width: int
+      width of the convolution
+    a_conv: theano.shared(fmatrix)
+      matrix of character convolutions
+    a_conv_max: theano.shared(fvector)
+      vector of maximum character convolutions
 
     Returns:
     --------
      (void)
 
     """
-    emb = TT.tensor4(name = "iemb")
-    conv = TT.reshape(TT.nnet.conv.conv2d(emb, a_conv), \
-                      (a_nconv, a_seq_len - a_conv_width + 1)).T
-    conv_max = conv.max(axis = 0) + a_conv_bias
-    conv_amax = conv.argmax(axis = 0)
-    get_conv = theano.function([emb], [conv, conv_max, conv_amax], \
-                               name = "get_conv")
-    conv_out, max_out, amax_out = get_conv(a_emb)
-    for i, j in enumerate(amax_out):
+    conv = TT.matrix(name = "conv")
+    amax = conv.argmax(axis = 0)
+    get_amax = theano.function([conv], [amax], name = "get_amax")
+    amax_out = get_amax(a_conv)
+    for i, j in enumerate(amax_out[0]):
         print("conv{:d}[{:d}]: {:s} ({:.5f})".format(a_conv_width, i, \
                                                      ''.join(a_seq[j:j + a_conv_width]),
-                                                                   max_out[0][i]))
-    return max_out[0]
+                                                                   a_conv_max[0][i]))
 
 def _floatX(data, a_dtype = config.floatX):
     """Return numpy array populated with the given data.
@@ -155,14 +156,18 @@ def _balance_ts(a_ts, a_min, a_class2idx, icnt, a_binom = False):
 
     """
     ibinom = iseq = None
-    samples = [i for v in a_class2idx.itervalues() for i in v]
+    # samples = [i for v in a_class2idx.itervalues() for i in v]
     # clever sub-sampling (would probably work with SGD but does not work with AdaDelta)
-    # icnt // INCR_SAMPLE_AFTER + 1
-    # [i for v in a_class2idx.itervalues() for i in \
+    # icnt = icnt // INCR_SAMPLE_AFTER + 1
+    icnt = 1
+    samples= [i for v in a_class2idx.itervalues() for i in \
+        np.random.choice(v, min(float((icnt + 1) * 0.5) * CORPUS_PROPORTION_MAX * a_min, \
+                                len(v)), \
+                         replace = False)]
         # np.random.choice(v, min(float((icnt + 1) * 0.5) * CORPUS_PROPORTION_MAX * a_min, \
         #                               (float(icnt)/(icnt + 1.)) * len(v)), \
         #                           replace = False)]
-    np.random.shuffle(samples)
+    # np.random.shuffle(samples)
     for i in samples:
         if a_binom:
             iseq = []
@@ -279,8 +284,6 @@ class RNNModel(object):
         self.n_labels = 0
         self.vdim = a_vdim
         self.max_len = 0        # maximum length of an input item
-        # maximum width of a convolution stride
-        self.max_conv_len = theano.shared(value = 5, name = "MAX_CONV_LEN")
         # mapping from symbolic representations to indices
         self.lbl2int = dict()
         self.int2lbl = dict()
@@ -329,7 +332,7 @@ class RNNModel(object):
             labels.add(lbl)
             featset.update(w)
             # append auxiliary items to training instances
-            w[:0] = [BEG]; w.append(END)
+            # w[:0] = [BEG]; w.append(END)
             self.max_len = max(self.max_len, len(w))
         self.V = len(AUX_VEC_KEYS) + len(featset)
         del featset
@@ -351,14 +354,14 @@ class RNNModel(object):
         # get the minimum number of instances per class
         min_items = min(n_items)
         # due to unbalanced classes, we have to introduce error coefficients
-        err_coeff = [(1. - float(c_i)/total_items) for c_i in n_items]
-        self.ERR_COEFF = theano.shared(value = _floatX(err_coeff) , name = "CONV_COEFF")
+        # err_coeff = [(1. - float(c_i)/total_items) for c_i in n_items]
+        # self.ERR_COEFF = theano.shared(value = _floatX(err_coeff) , name = "CONV_COEFF")
 
         # initialize LSTM layer
-        cmo_out, hw2_carry_out = self._emb2conv(self.CHAR_INDICES)
+        # cmo_out, hw2_carry_out = self._emb2conv(self.CHAR_INDICES)
+        self._emb2conv(self.CHAR_INDICES)
         # initialize dropout layer
         # dropout_out = self._init_dropout(lstm_out[-1])
-        cmo = self.CMO_COEFF * cmo_out + self.CONV_COEFF * TT.nnet.sigmoid(hw2_carry_out)
 
         # self.LSTM2I = theano.shared(value = HE_NORMAL.sample((self.n_cmo, self.n_cmo)), \
         #                             name = "LSTM2I")
@@ -381,13 +384,15 @@ class RNNModel(object):
         self.Y_BIAS = theano.shared(value = HE_NORMAL.sample((1, self.n_labels)).flatten(), \
                                     name = "Y_BIAS")
         # output layer
-        self.Y = TT.nnet.softmax(TT.dot(cmo, self.CMO2Y) + self.Y_BIAS)
+        self.Y = TT.nnet.softmax(TT.dot(self.CMO, self.CMO2Y) + self.Y_BIAS)
 
         # add newly initialized weights to the parameters to be trained
         self._params += [self.CMO2Y, self.Y_BIAS]
 
         # correct label
         y = TT.scalar('y', dtype = "int32")
+        # predicted label
+        self._activate_predict()
 
         # cost gradients and updates
         cost = -TT.log(self.Y[0, y]) \
@@ -395,9 +400,10 @@ class RNNModel(object):
 
         # Alternative cost functions:
         # cost = self.Y.sum() - 2 * self.Y[0, y]
-        # cost = 0.5 * ((self.LSTM2Y ** 2).sum() + (self.Y_BIAS ** 2).sum()) + \
-        #        SVM_C * (TT.max(1 - self.Y * y, 0) ** 2).sum()
-
+        # ones = theano.shared(value = _floatX(np.ones((1, self.n_labels))), name = "ones")
+        # zeros = theano.shared(value = _floatX(np.zeros((1, self.n_labels))), name = "ones")
+        # cost = SVM_C * (TT.max([1 - self.Y[y], 0]) ** 2 + TT.max([1 + self.Y[1-y], 0]) ** 2) \
+        #        + L2 * TT.sum([TT.sum(p ** 2) for p in self._params])
         # AdaDelta:
         gradients = TT.grad(cost, wrt = self._params)
         # define training function and let the training begin
@@ -410,15 +416,10 @@ class RNNModel(object):
         # train = theano.function(inputs  = [self.W_INDICES, y, alpha], \
         #                             outputs = cost, updates = updates)
 
-        # Predictions:
-        y_pred = TT.argmax(self.Y, axis = 1)
-        # prediction function
-        _predict = theano.function([self.CHAR_INDICES], [y_pred], name = "predict")
-
         if a_devset is not None:
-            for w, _ in a_devset:
-                # append auxiliary items to training instances
-                w[:0] = [BEG]; w.append(END)
+            # for w, _ in a_devset:
+            #     # append auxiliary items to training instances
+            #     w[:0] = [BEG]; w.append(END)
             a_devset = self._digitize_feats(a_devset)
             # initialize and populate rho statistics
             rhostat = defaultdict(lambda: [0, 0])
@@ -431,6 +432,7 @@ class RNNModel(object):
         idx_list = np.arange(N, dtype="int32")
         mb_size = max(N // 10, 1)
 
+        ts = None
         dev_stat = None
         dev_score = max_dev_score = -INF
         if a_devset is None:
@@ -439,9 +441,12 @@ class RNNModel(object):
         print("lbl2int =", repr(self.lbl2int), file = sys.stderr)
         for i in xrange(MAX_ITERS):
             icost = 0.
+            if (i % RESAMPLE_AFTER) == 0:
+                ts = [ti for ti in _balance_ts(a_trainset, min_items, class2indices, i)]
             start_time = datetime.utcnow()
             # iterate over the training instances
-            for x_i, y_i in _balance_ts(a_trainset, min_items, class2indices, i):
+            np.random.shuffle(ts)
+            for x_i, y_i in ts:
                 try:
                     icost += f_grad_shared(x_i, y_i)
                     f_update()
@@ -463,7 +468,7 @@ class RNNModel(object):
                     rhostat[k][PRDCT_IDX] = 0
                 # compute rho statistics anew
                 for x_i, y_i in a_devset:
-                    rhostat[y_i][PRDCT_IDX] += (_predict(x_i)[0] == y_i)
+                    rhostat[y_i][PRDCT_IDX] += (self._predict(x_i)[0] == y_i)
                 dev_stat = [float(v[PRDCT_IDX])/float(v[TOTAL_IDX] or 1.) \
                             for v in rhostat.itervalues()]
                 dev_score = sum(dev_stat) / float(len(rhostat) or 1)
@@ -493,7 +498,7 @@ class RNNModel(object):
         @return 2-tuple with predicted label and its assigned score
 
         """
-        a_seq[:0] = [BEG]; a_seq.append(END)
+        # a_seq[:0] = [BEG]; a_seq.append(END)
         self._activate_predict()
         y, score = self._predict(self._feat2idcs(a_seq))
         return (self.int2lbl[int(y)], score)
@@ -510,61 +515,81 @@ class RNNModel(object):
         (TT.vector): convolution vector
 
         """
-        a_seq[:0] = [BEG]; a_seq.append(END)
+        # a_seq[:0] = [BEG]; a_seq.append(END)
         a_dseq = self._feat2idcs(a_seq)
         # output embeddings
-        in_len = len(a_dseq)
-        emb = self.EMB[self.CHAR_INDICES]
-        d_emb = printing.Print("EMB =")(emb)
+        d_emb = printing.Print("EMB =")(self.CONV_IN)
         debug_emb = theano.function([self.CHAR_INDICES], [d_emb], name = "debug_emb")
         print("*** EMBEDDINGS ***")
         debug_emb(a_dseq)
 
+        get_conv_in = theano.function([self.CHAR_INDICES], \
+                                      [self.CONV_IN, self.IN_LEN], name = "get_conv_in")
+        conv_in, in_len = get_conv_in(a_dseq)
         # output convolutions
-        ee = emb.reshape((1, 1, in_len, self.vdim))
-        get_ee = theano.function([self.CHAR_INDICES], [ee], name = "get_ee")
-        eemb = get_ee(a_dseq)[0]
         print("*** CONVOLUTIONS(2) ***")
-        conv2_out = _debug_conv(a_seq, in_len, eemb, self.CONV2, self.CONV2_BIAS, \
-                                self.n_conv2, self.conv2_width)
+        print("conv_in =", repr(conv_in))
+        print("in_len =", repr(in_len))
+        # print("self.CONV2_BIAS =", repr(self.CONV2_BIAS.get_value()))
+
+        # get_conv2 = theano.function([self.CONV_IN, self.IN_LEN], \
+        #                             [self.CONV2_OUT, self.CONV2_MAX_OUT], \
+        #                             name = "get_conv2")
+        # conv2_out, conv2_max_out = get_conv2(conv_in, in_len)
+        # _debug_conv(a_seq, self.conv2_width, conv2_out, conv2_max_out)
         print("*** CONVOLUTIONS(3) ***")
-        conv3_out = _debug_conv(a_seq, in_len, eemb, self.CONV3, self.CONV3_BIAS, \
-                                self.n_conv3, self.conv3_width)
+        get_conv3 = theano.function([self.CONV_IN, self.IN_LEN], \
+                                    [self.CONV3_OUT, self.CONV3_MAX_OUT], \
+                                    name = "get_conv3")
+        conv3_out, conv3_max_out = get_conv3(conv_in, in_len)
+        _debug_conv(a_seq, self.conv3_width, conv3_out, conv3_max_out)
         print("*** CONVOLUTIONS(4) ***")
-        conv4_out = _debug_conv(a_seq, in_len, eemb, self.CONV4, self.CONV4_BIAS, \
-                                self.n_conv4, self.conv4_width)
+        get_conv4 = theano.function([self.CONV_IN, self.IN_LEN], \
+                                    [self.CONV4_OUT, self.CONV4_MAX_OUT], \
+                                    name = "get_conv4")
+        conv4_out, conv4_max_out = get_conv4(conv_in, in_len)
+        _debug_conv(a_seq, self.conv4_width, conv4_out, conv4_max_out)
         print("*** CONVOLUTIONS(5) ***")
-        conv5_out = _debug_conv(a_seq, in_len, eemb, self.CONV5, self.CONV5_BIAS, \
-                                self.n_conv5, self.conv5_width)
+        get_conv5 = theano.function([self.CONV_IN, self.IN_LEN], \
+                                    [self.CONV5_OUT, self.CONV5_MAX_OUT], \
+                                    name = "get_conv4")
+        conv5_out, conv5_max_out = get_conv5(conv_in, in_len)
+        _debug_conv(a_seq, self.conv5_width, conv5_out, conv5_max_out)
+
+        # concatenated convolution layer
+        get_conv_max_out = theano.function([self.CONV3_MAX_OUT, \
+                                            self.CONV4_MAX_OUT, self.CONV5_MAX_OUT], \
+                                           [self.CONV_MAX_OUT], \
+                                           name = "get_conv_max_out")
+        conv_max_out = get_conv_max_out(conv3_max_out, \
+                                            conv4_max_out, conv5_max_out)[0]
+        print("*** CONV_MAX_OUT ***\n", repr(conv_max_out), file = sys.stderr)
 
         # output highways
-        print("conv2_out = ", repr(conv2_out), file = sys.stderr)
-        print("conv3_out = ", repr(conv3_out), file = sys.stderr)
-        conv_max_out = np.concatenate((conv2_out, conv3_out, conv4_out, conv5_out))
-        print("conv_max_out = ", repr(conv_max_out), file = sys.stderr)
-        cmo = TT.vector(name = "cmo")
-        hw2_trans = TT.nnet.hard_sigmoid(TT.dot(cmo, self.HW2_TRANS) + self.HW2_TRANS_BIAS)
-        hw2_carry = TT.nnet.relu(cmo * (1. - hw2_trans), alpha = RELU_ALPHA)
-        d_hw2_trans = printing.Print("HW2_TRANS =")(hw2_trans)
-        debug_hw2_trans = theano.function([cmo], [d_hw2_trans], name = "debug_hw2_trans")
-        print("*** HW2 TRANS ***")
-        debug_hw2_trans(conv_max_out)
-        d_hw2_carry = printing.Print("HW2_CARRY =")(hw2_carry)
-        debug_hw2_carry = theano.function([cmo], [d_hw2_carry], name = "debug_hw2_carry")
-        print("*** HW2 CARRY ***")
-        debug_hw2_carry(conv_max_out)
-        print("*** HW OUT ***")
-        hw_out = TT.dot(hw2_trans, self.CMO_W) + self.CMO_BIAS
-        d_hw_out = printing.Print("HW_OUT =")(hw_out)
-        debug_hw_out = theano.function([cmo], [d_hw_out], name = "debug_hw_out")
-        debug_hw_out(conv_max_out)
-        print("*** PRE_Y ***")
-        pre_y = self.CMO_COEFF * hw_out + self.CONV_COEFF * TT.nnet.sigmoid(hw2_carry)
-        d_pre_y = printing.Print("HW_OUT =")(pre_y)
-        debug_pre_y = theano.function([cmo], [d_pre_y], name = "debug_pre_y")
-        debug_pre_y(conv_max_out)
+        get_hw_trans = theano.function([self.CONV_MAX_OUT], [self.HW2_TRANS], \
+                                       name = "get_hw_trans")
+        hw_trans = get_hw_trans(conv_max_out)[0]
+        print("*** HW_TRANS ***\n", repr(hw_trans), file = sys.stderr)
 
-        # output predictions
+        get_hw_carry = theano.function([self.CONV_MAX_OUT], [self.HW2_CARRY], \
+                                       name = "get_hw_carry")
+        hw_carry = get_hw_carry(conv_max_out)[0]
+        print("*** HW_CARRY ***\n", repr(hw_trans), file = sys.stderr)
+        # output CMO and final predictions
+        get_cmo = theano.function([self.CONV_MAX_OUT, self.HW2_TRANS, self.HW2_CARRY], \
+                                  [self.CMO], name = "get_cmo")
+        cmo = get_cmo(conv_max_out, hw_trans, hw_carry)
+        print("*** CMO ***\n", repr(cmo), file = sys.stderr)
+
+        # output CMO2Y and Y_BIAS
+        print("*** CMO2Y ***\n", repr(self.CMO2Y.get_value()), file = sys.stderr)
+        print("*** Y_BIAS ***\n", repr(self.Y_BIAS.get_value()), file = sys.stderr)
+
+        # output final predictions
+        get_y = theano.function([self.CMO], [self.Y], name = "get_y")
+        print("*** Y ***\n", repr(get_y(cmo[0])), file = sys.stderr)
+
+        # re-check predictions
         self._activate_predict()
         y, score = self._predict(self._feat2idcs(a_seq))
         print("y =", repr(self.int2lbl[int(y)]), file = sys.stderr)
@@ -632,7 +657,7 @@ class RNNModel(object):
         cfeats = len(self.feat2idx)
         # determine maximum word length in sequence
         ilen = len(a_seq)
-        max_len = max(ilen, self.conv2_width, self.conv3_width, \
+        max_len = max(ilen, self.conv3_width, \
                       self.conv4_width, self.conv5_width)
         for ichar in a_seq:
             if a_add and ichar not in self.feat2idx:
@@ -649,32 +674,22 @@ class RNNModel(object):
         @return \c void
 
         """
-        # auxiliary zero matrix used for padding the input
-        self._subzero = TT.zeros((self.max_conv_len, self.vdim))
-        # # matrix of char vectors, corresponding to single word
-        # self.W_INDICES = TT.imatrix(name = "W_INDICES")
         # matrix of char vectors, corresponding to single word
         self.CHAR_INDICES = TT.ivector(name = "CHAR_INDICES")
-        # number of embeddings per training item
-        self.M_EMB = TT.shape(self.CHAR_INDICES)[0]
-        # number of padding rows
-        self.M_PAD = TT.max([self.max_conv_len - self.M_EMB, 0])
-        # length of input
-        self.IN_LEN = self.M_EMB + self.M_PAD
 
         ################
         # CONVOLUTIONS #
         ################
         # three convolutional filters for strides of width 2
-        self.n_conv2 = 5 # number of filters
-        self.conv2_width = 2 # width of stride
-        self.CONV2 = theano.shared(value = HE_NORMAL.sample((self.n_conv2, 1, \
-                                                             self.conv2_width, self.vdim)), \
-                                   name = "CONV2")
-        self.CONV2_BIAS = theano.shared(value = HE_NORMAL.sample((1, self.n_conv2)), \
-                                        name = "CONV2_BIAS")
+        # self.n_conv2 = 5 # number of filters
+        # self.conv2_width = 2 # width of stride
+        # self.CONV2 = theano.shared(value = HE_NORMAL.sample((self.n_conv2, 1, \
+        #                                                      self.conv2_width, self.vdim)), \
+        #                            name = "CONV2")
+        # self.CONV2_BIAS = theano.shared(value = HE_NORMAL.sample((1, self.n_conv2)), \
+                                        # name = "CONV2_BIAS")
         # four convolutional filters for strides of width 3
-        self.n_conv3 = 12 # number of filters
+        self.n_conv3 = 6 # number of filters
         self.conv3_width = 3 # width of stride
         self.CONV3 = theano.shared(value = HE_NORMAL.sample((self.n_conv3, 1, \
                                                              self.conv3_width, self.vdim)), \
@@ -690,7 +705,7 @@ class RNNModel(object):
         self.CONV4_BIAS = theano.shared(value = HE_NORMAL.sample((1, self.n_conv4)), \
                                         name = "CONV4_BIAS")
         # five convolutional filters for strides of width 4
-        self.n_conv5 = 15 # number of filters
+        self.n_conv5 = 20 # number of filters
         self.conv5_width = 5 # width of stride
         self.CONV5 = theano.shared(value = HE_NORMAL.sample((self.n_conv5, 1, \
                                                              self.conv5_width, self.vdim)), \
@@ -698,12 +713,12 @@ class RNNModel(object):
         self.CONV5_BIAS = theano.shared(value = HE_NORMAL.sample((1, self.n_conv5)), \
                                         name = "CONV5_BIAS")
         # remember parameters to be learned
-        self._params += [self.CONV2, self.CONV3, self.CONV4, self.CONV5, \
-                         self.CONV2_BIAS, self.CONV3_BIAS, self.CONV4_BIAS, self.CONV5_BIAS]
+        self._params += [self.CONV3, self.CONV4, self.CONV5, \
+                         self.CONV3_BIAS, self.CONV4_BIAS, self.CONV5_BIAS]
         ############
         # Highways #
         ############
-        self.n_cmo = self.n_conv2 + self.n_conv3 + self.n_conv4 + self.n_conv5
+        self.n_cmo = self.n_conv3 + self.n_conv4 + self.n_conv5
         # the 1-st highway links character embeddings to the output
         # self.HW1_TRANS_COEFF = theano.shared(value = _floatX(0.75) , name = "HW1_TRANS_COEFF")
         # self.HW1_TRANS = theano.shared(value = HE_UNIFORM_RELU.sample((self.vdim, self.n_cmo)), \
@@ -744,10 +759,10 @@ class RNNModel(object):
         # Coefficients #
         ################
         # self.EMB_COEFF = theano.shared(value = _floatX(0.25) , name = "EMB_COEFF")
-        self.CONV_COEFF = theano.shared(value = _floatX(0.5) , name = "CONV_COEFF")
-        self.CMO_COEFF = theano.shared(value = _floatX(1.) , name = "CMO_COEFF")
+        # self.CONV_COEFF = theano.shared(value = _floatX(0.5) , name = "CONV_COEFF")
+        # self.CMO_COEFF = theano.shared(value = _floatX(1.) , name = "CMO_COEFF")
 
-        self._params += [self.CONV_COEFF, self.CMO_COEFF]
+        # self._params += [self.CONV_COEFF, self.CMO_COEFF]
         ###########
         # DROPOUT #
         ###########
@@ -781,38 +796,39 @@ class RNNModel(object):
 
         """
         # length of character input
-        in_len = a_x.shape[0]
+        self.IN_LEN = a_x.shape[0]
         # input to convolutional layer
-        conv_in = self.EMB[a_x].reshape((1, 1, in_len, self.vdim))
+        self.CONV_IN = self.EMB[a_x].reshape((1, 1, self.IN_LEN, self.vdim))
         # first highway passes embeddings to convolutions and directly to the output layer
         # hw1_carry = (1 - self.HW1_TRANS_COEFF) * \
         #             TT.nnet.relu(TT.dot(self.EMB[a_x].mean(axis = 0).reshape((self.vdim,)), \
         #                                 self.HW1_TRANS) + self.HW1_TRANS_BIAS, alpha = RELU_ALPHA)
         # width-2 convolutions
-        conv2_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV2), \
-                               (self.n_conv2, in_len - self.conv2_width + 1)).T
-        conv2_max_out = conv2_out.max(axis = 0) + self.CONV2_BIAS
+        # self.CONV2_OUT = TT.reshape(TT.nnet.conv.conv2d(self.CONV_IN, self.CONV2), \
+        #                        (self.n_conv2, self.IN_LEN - self.conv2_width + 1)).T
+        # self.CONV2_MAX_OUT = self.CONV2_OUT.max(axis = 0) + self.CONV2_BIAS
         # width-3 convolutions
-        conv3_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV3), \
-                               (self.n_conv3, in_len - self.conv3_width + 1)).T
-        conv3_max_out = conv3_out.max(axis = 0) + self.CONV3_BIAS
+        self.CONV3_OUT = TT.reshape(TT.nnet.conv.conv2d(self.CONV_IN, self.CONV3), \
+                               (self.n_conv3, self.IN_LEN - self.conv3_width + 1)).T
+        self.CONV3_MAX_OUT = self.CONV3_OUT.max(axis = 0) + self.CONV3_BIAS
         # width-4 convolutions
-        conv4_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV4), \
-                               (self.n_conv4, in_len - self.conv4_width + 1)).T
-        conv4_max_out = conv4_out.max(axis = 0) + self.CONV4_BIAS
+        self.CONV4_OUT = TT.reshape(TT.nnet.conv.conv2d(self.CONV_IN, self.CONV4), \
+                               (self.n_conv4, self.IN_LEN - self.conv4_width + 1)).T
+        self.CONV4_MAX_OUT = self.CONV4_OUT.max(axis = 0) + self.CONV4_BIAS
         # width-5 convolutions
-        conv5_out = TT.reshape(TT.nnet.conv.conv2d(conv_in, self.CONV5), \
-                               (self.n_conv5, in_len - self.conv5_width + 1)).T
-        conv5_max_out = conv5_out.max(axis = 0) + self.CONV5_BIAS
+        self.CONV5_OUT = TT.reshape(TT.nnet.conv.conv2d(self.CONV_IN, self.CONV5), \
+                               (self.n_conv5, self.IN_LEN - self.conv5_width + 1)).T
+        self.CONV5_MAX_OUT = self.CONV5_OUT.max(axis = 0) + self.CONV5_BIAS
         # output convolutions
-        conv_max_out = TT.concatenate([conv2_max_out, conv3_max_out, \
-                                       conv4_max_out, conv5_max_out], axis = 1)
-        hw2_trans = TT.nnet.hard_sigmoid(TT.dot(conv_max_out[0,:], self.HW2_TRANS) + \
-                                        self.HW2_TRANS_BIAS)
-        hw2_carry = TT.nnet.relu(conv_max_out[0,:] * (1. - hw2_trans), alpha = RELU_ALPHA)
+        self.CONV_MAX_OUT = TT.concatenate([self.CONV3_MAX_OUT, \
+                                       self.CONV4_MAX_OUT, self.CONV5_MAX_OUT], axis = 1)
+        self.HW2_TRANS = TT.nnet.sigmoid(TT.dot(self.CONV_MAX_OUT[0,:], self.HW2_TRANS) + \
+                                    self.HW2_TRANS_BIAS)
+        self.HW2_CARRY = self.CONV_MAX_OUT[0,:] * (1. - self.HW2_TRANS)
+        self.CMO = TT.tanh(TT.dot(self.CONV_MAX_OUT[0,:], self.CMO_W) + self.CMO_BIAS) * \
+                   self.HW2_TRANS + self.HW2_CARRY
         # lstm_in = TT.dot(conv_max_out[0,:], self.LSTM_W) + self.LSTM_BIAS
-        cmo = TT.dot(hw2_trans, self.CMO_W) + self.CMO_BIAS
-        return cmo, hw2_carry
+        # return cmo, hw2_carry
 
     # def _init_lstm(self):
     #     """Initialize parameters of LSTM layer.
