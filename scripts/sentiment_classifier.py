@@ -63,12 +63,13 @@ class SentimentClassifier(object):
             self.debug = self._debug
 
     def train(self, a_train_set, a_path = DFLT_MODEL_PATH, \
-              a_dev_set = None):
+              a_dev_set = None, **a_kwargs):
         """Train model and store it at specified path.
 
         @param a_train_set - training set with examples and classes
         @param a_path - training set with examples and classes
         @param a_dev_set - development set with examples and classes
+        @param a_kwargs - additional keyword arguments
 
         @return \c void
 
@@ -82,7 +83,7 @@ class SentimentClassifier(object):
             raise RuntimeError("Can't create model at specified path: '{:s}'".format(a_path))
         # create and train an RNN model
         imodel = RNNModel()
-        imodel.fit(a_train_set, a_path, a_dev_set)
+        imodel.fit(a_train_set, a_path, a_dev_set, **a_kwargs)
         # remember model as instance attribute
         self.model = imodel
         # self.predict = self._predict
