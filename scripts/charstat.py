@@ -83,7 +83,7 @@ def _iterchars(a_str, a_n=DFLT_N):
         yield a_str[i:i+a_n]
 
 
-def compute_cnt(a_it, a_n_char):
+def compute_cnt(a_it, a_n_char=1):
     """Compute counts of classes and characters.
 
     Args:
@@ -107,6 +107,7 @@ def compute_cnt(a_it, a_n_char):
         cls_cnt[icls][TTL_MSG_IDX] += 1.
         cls_cnt[icls][TTL_CHAR_IDX] += len(itext) - a_n_char + 1.
         # update character statistics
+        print("itext =", repr(itext), file=sys.stderr)
         iCounter.update(_iterchars(itext, a_n_char))
         for ichar, icnt in iCounter.iteritems():
             char_cnt[ichar][icls][icnt] += 1.
@@ -383,8 +384,8 @@ character n-grams characteristic to specific sentiment classes.""")
     # iterate over lines of files and count character combinations
     cls_cnt, char_cnt = compute_cnt(((ifields[GLD_IDX], ifields[TXT_IDX])
                                      for ifile in args.files
-                                     for ifields in iterlines(ifile)
-                                     ), args.n_char)
+                                     for ifields in iterlines(ifile)),
+                                    args.n_char)
 
     # compute statistics (mean and variance) of chararacter sequences
     cls_stat, char_stat, char_cls_stat = compute_stat(cls_cnt, char_cnt)

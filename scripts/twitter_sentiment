@@ -21,8 +21,8 @@ twitter_sentiment [MODE] [OPTIONS] [input_file]
 from __future__ import print_function, unicode_literals
 
 from sentiment_classifier import SentimentClassifier
-from evaluate import evaluate, get_fields, GLD_IDX, TXT_IDX, TOPIC_IDX
-from twokenize import tokenize
+from evaluate import evaluate, get_fields, GLD_IDX, TXT_IDX
+from preprocessing import ENCODING, iterlines, _cleanse
 
 import argparse
 import codecs
@@ -32,32 +32,24 @@ import sys
 
 ##################################################################
 # Variables and Constants
+# index of the topic field in the test file
+TEST_TOPIC_IDX=1
+
 TRAIN = "train"
 TEST = "test"
 EVALUATE = "evaluate"
-ENCODING = "utf-8"
 
 TAB = "\t"
 TAB_RE = re.compile(TAB)
 NONMATCH_RE = re.compile("(?!)")
-POS_CHAR = ''
-NEG_CHAR = ''
-TOPIC2RE = {}
-POS_RE = re.compile(r"[\b\A](amazing|better|best|cool||fun|fant|good|great|like|love|luv|wow|wonder\b|:\))")
 
-# text normalization
-STOP_WORDS_RE = re.compile(r"(?:\b|\A)(i|the(?:re|ir|[my])?|(?:any|every)body|here|from|an?|i[stn]|[a']re|am|was|we(?:re)?|ha[ds]|have|to|with|will|all|each|wh(?:en|ich|ere|o|at)(?:ever)?|makes?|making|may|might|i(?:'?m)?|that|we\'?re|\'?s|through|by|(?:get|put|say|set)(?:ting|s)?|be(?:en|ing)?|this|as|going|do(?:es)?|did|tomorrow|week|today|monday|tuesday|thursday|wednesday|friday|saturday|yesterday|tonight|sunday|gives?|about|[bmw]e|y?ou(?:rs?)?|u|some(?:thing|one)?|and|o[fr]|for|\'?(?:ve|d)|us|s?he|on|(?:some)?where|so|[ia]t|it\'?s|gonna|cc|\'?ll|may|take[ns]?|took|how|let|her?|she|it|hi[ms]|my|(?:an)?other|g[eo]ts?|while|can|either|[oi]nto|via|if|hi|one|october|january|february|march|april|may|june|july|august|september|october|november|december|nov|aug|feb|sept|two)(?:[.%$\"'`])?(?=\s|[?!]|\Z)")
-PUNCT_RE = re.compile("(\s|\A|\w)(?:-+|,+|:+|[.%$\"'`]+)(\s|\Z)")
-NEG_RE = re.compile("(?:\s|\A)(?:has|have|is|was|do|does|need|ca|wo|would)(n'?t)(?:\s|\Z)")
-AMP_RE = re.compile(r"&amp;")
-GT_RE = re.compile(r"&gt;")
-LT_RE = re.compile(r"&lt;")
-DIGIT_RE = re.compile(r"\b[\d:]+(?:[ap]\.?m\.?|th|rd|nd|m|b)?\b")
-HTTP_RE = re.compile(r"(?:https?://\S*|\b(?:(?:[\w]{3,5}://?|(?:www|bit)[.]|(?:\w[-\w]+[.])+(?:a(?:ero|sia|[c-gil-oq-uwxz])|b(?:iz|[abd-jmnorstvwyz])|c(?:at|o(?:m|op)|[acdf-ik-orsuvxyz])|d[dejkmoz]|e(?:du|[ceghtu])|f[ijkmor]|g(?:ov|[abd-ilmnp-uwy])|h[kmnrtu]|i(?:n(?:fo|t)|[del-oq-t])|j(?:obs|[emop])|k[eghimnprwyz]|l[abcikr-vy]|m(?:il|obi|useum|[acdeghk-z])|n(?:ame|et|[acefgilopruz])|o(?:m|rg)|p(?:ro|[ae-hk-nrstwy])|qa|r[eosuw]|s[a-eg-or-vxyz]|t(?:(?:rav)?el|[cdfghj-pr])|xxx)\b)(?:[^\s,.:;]|\.\w)*))")
-AT_RE = re.compile(r"(RT\s+)?[.]?@\S+")
-SPACE_RE = re.compile(r"\s\s+")
+# Subjectivity Clues Lexicon
+SUBJCL = "SubjectivityClues"
+SUBJCL_W_IDX = 0                # index of a polar term
+SUBJCL_SCORE_IDX = 1            # index of the score
+SUBJCL_THRSHLD = 0              # minimum required absolute score
 
-# HSAN dictionary
+# HSAN dictionary (should be prefered)
 HSAN = "HashtagSentimentAffLexNegLex"
 HSAN_W_IDX = 0                # index of a polar term
 HSAN_SCORE_IDX = 1              # index of the score
@@ -66,10 +58,11 @@ HSAN_NEG_RE = re.compile(r"(.*)(_neg(?:first)?)")
 
 # Sentiment 140
 S140 = "Sentiment140-Lexicon-v0.1"
-S140_W_IDX = 0                # index of a polar term
+S140_W_IDX = 0                  # index of a polar term
 S140_SCORE_IDX = 1              # index of the score
-S140_THRSHLD = 3.               # minimum required absolute score
+S140_THRSHLD = 2.5              # minimum required absolute score
 S140_NEG_RE = HSAN_NEG_RE
+S140_STOP_WORDS = set(["out"])
 
 # NRC Hashtag
 NRC_HSHTAG = "NRC-Hashtag-Sentiment-Lexicon-v0.1"
@@ -77,6 +70,10 @@ NRC_HSHTAG_W_IDX = 0            # index of a polar term
 NRC_HSHTAG_SCORE_IDX = 1        # index of the score
 NRC_POSITIVE = "positive"
 NRC_NEGATIVE = "negative"
+
+# default lexicon entries
+DFLT_POS = set([":)", ":-)", ":D", ":-D"])
+DFLT_NEG = set([":(", ":-(", ":'("])
 
 ##################################################################
 # Methods
@@ -88,72 +85,13 @@ def _add_cmn_options(a_parser):
     @return \c void
 
     """
-    a_parser.add_argument("-m", "--model", help = "path to the (stored or to be stored) model", \
-                              type = str)
-    a_parser.add_argument("files", help = "input files in TSV format", \
-                              type = argparse.FileType('r'), nargs = '*', default = [sys.stdin])
+    a_parser.add_argument("-m", "--model",
+                          help="path to the (stored or to be stored) model",
+                          type=str)
+    a_parser.add_argument("files", help="input files in TSV format",
+                          type=argparse.FileType('r'),
+                          nargs='*', default=[sys.stdin])
 
-def _safe_sub(a_re, a_sub, a_line):
-    """Perform substitution on line and return it unchanged if line gets empty
-
-    Args:
-    -----
-      a_re - regular expression to substitue
-      a_sub - substitution
-      a_line - line where the substitution should be done
-
-    Returns:
-    --------
-      (str): line with substitutions or unchanged line if it got empty
-
-    """
-    return a_re.sub(a_sub, a_line).strip() or a_line
-
-def _cleanse(a_line, a_topic = ""):
-    """Remove spurious elements from line.
-
-    @param a_line - line to be cleansed
-    @param (optional) a_topic - topic which the given line pertains to
-
-    @return cleansed line
-
-    """
-    global TOPIC2RE
-    line = _safe_sub(HTTP_RE, "", a_line.lower())
-    line = _safe_sub(AT_RE, "", line)
-    line = _safe_sub(DIGIT_RE, "", line)
-    line = _safe_sub(AMP_RE, "", line)
-    line = _safe_sub(AMP_RE, "", line)
-    line = _safe_sub(STOP_WORDS_RE, " ", line)
-    if a_topic:
-        a_topic = a_topic.lower()
-        if a_topic not in TOPIC2RE:
-            TOPIC2RE[a_topic] = re.compile(r"\b" + SPACE_RE.sub(r"\s+", re.escape(a_topic)) + r"\b")
-        line = _safe_sub(TOPIC2RE[a_topic], "", line)
-    line = _safe_sub(PUNCT_RE, "\\1\\2", line)
-    line = _safe_sub(SPACE_RE, ' ', line)
-    # print("modified line =", repr(line), file = sys.stderr)
-    # line = GT_RE.sub(">", LT_RE.sub("<", line))
-    # line = NEG_RE.sub(" not ", line)
-    # line = POS_RE.sub(POS_CHAR + "\\1", line)
-    # line = NEG_RE.sub(NEG_CHAR + "\\1", line)
-    return line
-
-def _iterlines(a_file):
-    """Iterate over input lines of a file
-
-    @param a_file - input file to iterate over
-
-    @return iterator over resulting TSV fields
-
-    """
-    ifields = []
-    for iline in a_file:
-        iline = iline.decode(ENCODING)
-        # compute prediction and append it to the list of fields
-        ifields = get_fields(iline)
-        ifields[TXT_IDX] = _cleanse(ifields[TXT_IDX], ifields[TOPIC_IDX])
-        yield ifields
 
 def _merge_lexica(a_lexica):
     """Read sentiment terms from lexicon file.
@@ -168,7 +106,8 @@ def _merge_lexica(a_lexica):
       (4-tuple): merges sets of positive and negative terms with their regexps
 
     """
-    pos = set(); neg = set()
+    pos = set() | DFLT_POS
+    neg = set() | DFLT_NEG
     for ipos, ineg in a_lexica:
         pos |= ipos
         neg |= ineg
@@ -182,12 +121,14 @@ def _merge_lexica(a_lexica):
         #     neg &= ineg
 
     if pos:
-        pos_re = re.compile(r"\b(" + "|".join([re.escape(t) for t in pos]) + r")(?=\s|\Z)")
+        pos_re = re.compile(r"\b(" + "|".join([re.escape(t)
+                                               for t in pos]) + r")(?=\s|\Z)")
     else:
         pos_re = NONMATCH_RE
 
     if neg:
-        neg_re = re.compile(r"\b(" + "|".join([re.escape(t) for t in neg]) + r")(?=\s|\Z)")
+        neg_re = re.compile(r"\b(" + "|".join([re.escape(t)
+                                               for t in neg]) + r")(?=\s|\Z)")
     else:
         neg_re = NONMATCH_RE
     return (pos, pos_re, neg, neg_re)
@@ -214,10 +155,13 @@ def _read_lexicon(a_dname):
         return _read_hsan(a_dname)
     elif basename == S140:
         return _read_s140(a_dname)
+    elif basename == SUBJCL:
+        return _read_subjcl(a_dname)
     elif basename == NRC_HSHTAG:
         return _read_nrc_hshtag(a_dname)
     else:
         raise Exception("Unknown dictionary format: '{:s}'".format(basename))
+
 
 def _read_hsan(a_dname):
     """Read HashtagSentimentAffLexNegLex sentiment lexicon.
@@ -234,9 +178,11 @@ def _read_hsan(a_dname):
     score = 0.
     term = ""
     fields = None
-    pos = set(); neg = set()
-    print("Reading HashtagSentimentAffLexNegLex... ", end = "", file = sys.stderr)
-    for fname in ["HS-AFFLEX-NEGLEX-unigrams.txt"]: # skip bigrams for the time being
+    pos = set()
+    neg = set()
+    print("Reading HashtagSentimentAffLexNegLex... ", end="", file=sys.stderr)
+    # skip bigrams for the time being
+    for fname in ["HS-AFFLEX-NEGLEX-unigrams.txt"]:
         fname = os.path.join(a_dname, fname)
         with codecs.open(fname, 'r', ENCODING) as ifile:
             for iline in ifile:
@@ -246,15 +192,17 @@ def _read_hsan(a_dname):
                 fields = TAB_RE.split(iline)
                 score = float(fields[HSAN_SCORE_IDX])
                 if abs(score) > HSAN_THRSHLD:
-                    term = HSAN_NEG_RE.sub("not \1", _cleanse(fields[HSAN_W_IDX]))
+                    term = HSAN_NEG_RE.sub("not \1",
+                                           _cleanse(fields[HSAN_W_IDX]))
                     if len(term) < 3:
                         continue
                     if score > 0.:
                         pos.add(term)
                     else:
                         neg.add(term)
-    print("done", file = sys.stderr)
+    print("done", file=sys.stderr)
     return (pos, neg)
+
 
 def _read_s140(a_dname):
     """Read Sentiment140-Lexicon-v0.1 sentiment lexicon.
@@ -284,9 +232,48 @@ def _read_s140(a_dname):
                 score = float(fields[S140_SCORE_IDX])
                 if abs(score) > S140_THRSHLD:
                     term = S140_NEG_RE.sub("not \1", _cleanse(fields[S140_W_IDX]))
-                    if len(term) < 3:
+                    if len(term) < 3 or term[0] == '@' or term in S140_STOP_WORDS:
                         continue
                     if score > 0.:
+                        pos.add(term)
+                    else:
+                        neg.add(term)
+    print("done", file = sys.stderr)
+    return (pos, neg)
+
+def _read_subjcl(a_dname):
+    """Read SubjectiveClues sentiment lexicon.
+
+    Args:
+    -----
+      a_dname (str): path to the directory with lexicon files
+
+    Returns:
+    --------
+      (2-tuple): sets of positive and negative terms
+
+    """
+    pos = set()
+    neg = set()
+    score  = 0.
+    term   = ""
+    fields = None
+    print("Reading Subjective Clues Lexicon... ", end="",
+          file=sys.stderr)
+    for fname in ["subjclueslen1-HLTEMNLP05.tff"]: # skip bigrams for the time being
+        fname = os.path.join(a_dname, fname)
+        with codecs.open(fname, 'r', ENCODING) as ifile:
+            for iline in ifile:
+                iline = iline.strip()
+                if not iline:
+                    continue
+                fields = TAB_RE.split(iline)
+                score = float(fields[SUBJCL_SCORE_IDX])
+                if abs(score) > SUBJCL_THRSHLD:
+                    term = _cleanse(fields[SUBJCL_W_IDX])
+                    if not(term):
+                        continue
+                    elif score > 0.:
                         pos.add(term)
                     else:
                         neg.add(term)
@@ -327,16 +314,18 @@ def _read_nrc_hshtag(a_dname):
     print("done", file = sys.stderr)
     return (pos, neg)
 
+
 def _read_dataset(a_files):
-    """Read data set into a list of two-tuples with input items and gold classes.
+    """Read data set into a list of 2-tuples with input items and gold classes.
 
     @param a_files - input files containing training data
 
     @return list of 2-tuples with input items and their gold classes
 
     """
-    return [(list(ifields[TXT_IDX]), ifields[GLD_IDX]) \
-            for ifile in a_files for ifields in _iterlines(ifile)]
+    return [(list(ifields[TXT_IDX]), ifields[GLD_IDX])
+            for ifile in a_files for ifields in iterlines(ifile)]
+
 
 def main():
     """Classify tweets according to their sentiment polarity
@@ -344,7 +333,7 @@ def main():
     @return \c 0 on success, non-0 other
     """
     # process CLI arguments
-    argparser = argparse.ArgumentParser(description = """Script for classifying
+    argparser = argparse.ArgumentParser(description="""Script for classifying
 tweets according to their sentiment polarity""")
 
     subparsers = argparser.add_subparsers(help="type of operation to perform", dest = "mode")
@@ -375,8 +364,8 @@ tweets according to their sentiment polarity""")
             dev_set = None
         else:
             dev_set = _read_dataset([args.dev_set])
-            lexica = [_read_lexicon(ilex) for ilex in args.lexicon]
-            pos, pos_re, neg, neg_re = _merge_lexica(lexica)
+        lexica = [_read_lexicon(ilex) for ilex in args.lexicon]
+        pos, pos_re, neg, neg_re = _merge_lexica(lexica)
         classifier.train(_read_dataset(args.files), a_path = args.model, \
                          a_dev_set = dev_set, a_pos = (pos_re, pos), \
                          a_neg = (neg_re, neg))
@@ -388,7 +377,7 @@ tweets according to their sentiment polarity""")
         else:
             classifier = SentimentClassifier()
         for ifile in args.files:
-            for ifields in _iterlines(ifile):
+            for ifields in iterlines(ifile, TEST_TOPIC_IDX):
                 if args.debug:
                     classifier.debug(list(ifields[TXT_IDX]))
                 else:
