@@ -53,12 +53,12 @@ ORTHOGONAL = Orthogonal()
 BINOMI_RSMPL = 0.15
 # probability of adding a new positive item from the lexicon as training
 # instance
-BINOMI_SMPL_POS = 0.12
+BINOMI_SMPL_POS = 0.1
 # probability of assigning class `2' to the new positive item
 BINOMI_POS_XTRM = 0.10383
 # probability of adding a new negative item from the lexicon as training
 # instance
-BINOMI_SMPL_NEG = 0.12
+BINOMI_SMPL_NEG = 0.1
 # probability of assigning class `2' to the new positive item
 BINOMI_NEG_XTRM = 0.112337
 # probability of adding an exclamation mark to extreme instance
@@ -69,8 +69,8 @@ CORPUS_PROPORTION_MAX = 1.1
 CORPUS_PROPORTION_MIN = 0.47
 RESAMPLE_AFTER = 35
 INCR_SAMPLE_AFTER = 150
-MAX_PRE_ITERS = RESAMPLE_AFTER * 7  # 15
-MAX_ITERS = RESAMPLE_AFTER * 30  # 60
+MAX_PRE_ITERS = RESAMPLE_AFTER * 15
+MAX_ITERS = RESAMPLE_AFTER * 60
 DS_PRCNT = 0.15
 
 # default training parameters
@@ -82,7 +82,7 @@ RMS = 2
 SVM_C = 3e-4
 L1 = 1e-4
 L2 = 1e-5
-L3 = 3e-3
+L3 = 3e-4
 
 # default dimension of input vectors
 VEC_DIM = 32
@@ -1121,70 +1121,72 @@ class RNNModel(object):
         ########################
         # Intermediate Level 0 #
         ########################
-        self.n_i0_conv3 = 6     # number of filters
-        self.i0_conv3_width = 3  # width of stride
-        self.I0_CONV3 = theano.shared(value=
-                                      HE_UNIFORM.sample(
-                                          (self.n_i0_conv3, 1,
-                                           self.i0_conv3_width, 1)),
-                                      name="I0_CONV3")
-        self.I0_CONV3_BIAS = theano.shared(value=
-                                           HE_UNIFORM.sample(
-                                               (1, self.n_i0_conv3)),
-                                           name="I0_CONV3_BIAS")
-        self._params += [self.I0_CONV3, self.I0_CONV3_BIAS]
 
-        self.n_i0_conv4 = 8     # number of filters
-        self.i0_conv4_width = 4  # width of stride
-        self.I0_CONV4 = theano.shared(value=
-                                      HE_UNIFORM.sample(
-                                          (self.n_i0_conv4, 1,
-                                           self.i0_conv4_width, 1)),
-                                      name="I0_CONV4")
-        self.I0_CONV4_BIAS = theano.shared(value=
-                                           HE_UNIFORM.sample(
-                                               (1, self.n_i0_conv4)),
-                                           name="I0_CONV4_BIAS")
-        self._params += [self.I0_CONV4, self.I0_CONV4_BIAS]
+        # for convolutional layers
+        # self.n_i0_conv3 = 6     # number of filters
+        # self.i0_conv3_width = 3  # width of stride
+        # self.I0_CONV3 = theano.shared(value=
+        #                               HE_UNIFORM.sample(
+        #                                   (self.n_i0_conv3, 1,
+        #                                    self.i0_conv3_width, 1)),
+        #                               name="I0_CONV3")
+        # self.I0_CONV3_BIAS = theano.shared(value=
+        #                                    HE_UNIFORM.sample(
+        #                                        (1, self.n_i0_conv3)),
+        #                                    name="I0_CONV3_BIAS")
+        # self._params += [self.I0_CONV3, self.I0_CONV3_BIAS]
 
-        self.n_i0_conv5 = 10    # number of filters
-        self.i0_conv5_width = 5  # width of stride
-        self.I0_CONV5 = theano.shared(value=
-                                      HE_UNIFORM.sample(
-                                          (self.n_i0_conv5, 1,
-                                           self.i0_conv5_width, 1)),
-                                      name="I0_CONV5")
-        self.I0_CONV5_BIAS = theano.shared(value=
-                                           HE_UNIFORM.sample(
-                                               (1, self.n_i0_conv5)),
-                                           name="I0_CONV5_BIAS")
-        self._params += [self.I0_CONV5, self.I0_CONV5_BIAS]
+        # self.n_i0_conv4 = 8     # number of filters
+        # self.i0_conv4_width = 4  # width of stride
+        # self.I0_CONV4 = theano.shared(value=
+        #                               HE_UNIFORM.sample(
+        #                                   (self.n_i0_conv4, 1,
+        #                                    self.i0_conv4_width, 1)),
+        #                               name="I0_CONV4")
+        # self.I0_CONV4_BIAS = theano.shared(value=
+        #                                    HE_UNIFORM.sample(
+        #                                        (1, self.n_i0_conv4)),
+        #                                    name="I0_CONV4_BIAS")
+        # self._params += [self.I0_CONV4, self.I0_CONV4_BIAS]
 
-        self.n_i0_conv = self.n_i0_conv3 + self.n_i0_conv4 + self.n_i0_conv5
-        self.I0_BIAS = theano.shared(value=
-                                     HE_UNIFORM.sample(
-                                         (1, self.n_i0_conv)),
-                                     name="I0_BIAS")
-        self._params += [self.I0_BIAS]
+        # self.n_i0_conv5 = 10    # number of filters
+        # self.i0_conv5_width = 5  # width of stride
+        # self.I0_CONV5 = theano.shared(value=
+        #                               HE_UNIFORM.sample(
+        #                                   (self.n_i0_conv5, 1,
+        #                                    self.i0_conv5_width, 1)),
+        #                               name="I0_CONV5")
+        # self.I0_CONV5_BIAS = theano.shared(value=
+        #                                    HE_UNIFORM.sample(
+        #                                        (1, self.n_i0_conv5)),
+        #                                    name="I0_CONV5_BIAS")
+        # self._params += [self.I0_CONV5, self.I0_CONV5_BIAS]
 
-        # self.CMO2I0 = theano.shared(value=ORTHOGONAL.sample(
-        #     (self.n_cmo, self.n_cmo)), name="CMO2I0")
+        # self.n_i0_conv = self.n_i0_conv3 + self.n_i0_conv4 + self.n_i0_conv5
         # self.I0_BIAS = theano.shared(value=
-        #                              HE_UNIFORM.sample((1, self.n_cmo)),
+        #                              HE_UNIFORM.sample(
+        #                                  (1, self.n_i0_conv)),
         #                              name="I0_BIAS")
-        # self._params += [self.CMO2I0, self.I0_BIAS]
+        # self._params += [self.I0_BIAS]
 
-        self.I02I1 = theano.shared(value=ORTHOGONAL.sample(
-            (self.n_i0_conv, self.n_i0_conv)), name="I02I1")
-        self.I1_BIAS = theano.shared(value=
-                                     HE_UNIFORM.sample(
-                                         (1, self.n_i0_conv)),
-                                     name="I1_BIAS")
+        self.CMO2I0 = theano.shared(value=ORTHOGONAL.sample(
+            (self.n_cmo, self.n_cmo)), name="CMO2I0")
+        self.I0_BIAS = theano.shared(value=
+                                     HE_UNIFORM.sample((1, self.n_cmo)),
+                                     name="I0_BIAS")
+        self._params += [self.CMO2I0, self.I0_BIAS]
+        # used for convolutions
         # self.I02I1 = theano.shared(value=ORTHOGONAL.sample(
-        #     (self.n_cmo, self.n_cmo)), name="I02I1")
+        #     (self.n_i0_conv, self.n_i0_conv)), name="I02I1")
         # self.I1_BIAS = theano.shared(value=
-        #                              HE_UNIFORM.sample((1, self.n_cmo)),
+        #                              HE_UNIFORM.sample(
+        #                                  (1, self.n_i0_conv)),
         #                              name="I1_BIAS")
+        self.I02I1 = theano.shared(value=ORTHOGONAL.sample(
+            (self.n_cmo, self.n_cmo)), name="I02I1")
+        self.I1_BIAS = theano.shared(value=
+                                     HE_UNIFORM.sample((1, self.n_cmo)),
+                                     name="I1_BIAS")
         self._params += [self.I02I1, self.I1_BIAS]
 
         ###########
@@ -1320,44 +1322,46 @@ class RNNModel(object):
         (void)
 
         """
-        # second layer of convolutions
-        cmo = self.CMO.reshape((1, 1, self.n_cmo, 1))
-        # width-3 convolutions
-        self.I0_CONV3_OUT = TT.reshape(
-            TT.nnet.conv.conv2d(cmo, self.I0_CONV3),
-            (self.n_i0_conv3, self.n_cmo - self.i0_conv3_width + 1)).T
-        self.I0_CONV3_MAX_OUT = self.I0_CONV3_OUT.max(axis=0) + \
-            self.I0_CONV3_BIAS
-        # width-4 convolutions
-        self.I0_CONV4_OUT = TT.reshape(
-            TT.nnet.conv.conv2d(cmo, self.I0_CONV4),
-            (self.n_i0_conv4, self.n_cmo - self.i0_conv4_width + 1)).T
-        self.I0_CONV4_MAX_OUT = self.I0_CONV4_OUT.max(axis=0) + \
-            self.I0_CONV4_BIAS
-        # width-5 convolutions
-        self.I0_CONV5_OUT = TT.reshape(
-            TT.nnet.conv.conv2d(cmo, self.I0_CONV5),
-            (self.n_i0_conv5, self.n_cmo - self.i0_conv5_width + 1)).T
-        self.I0_CONV5_MAX_OUT = self.I0_CONV5_OUT.max(axis=0) + \
-            self.I0_CONV5_BIAS
-        # uniting convolutions
-        i0 = TT.concatenate([self.I0_CONV3_MAX_OUT,
-                             self.I0_CONV4_MAX_OUT, self.I0_CONV5_MAX_OUT],
-                            axis=1)
-        self.I0 = TT.tanh(i0[0, :] + self.I0_BIAS)
-        # self.I0 = TT.tanh(TT.dot(self.CMO, self.CMO2I0) + self.I0_BIAS)
+        # # second layer of convolutions
+        # cmo = self.CMO.reshape((1, 1, self.n_cmo, 1))
+        # # width-3 convolutions
+        # self.I0_CONV3_OUT = TT.reshape(
+        #     TT.nnet.conv.conv2d(cmo, self.I0_CONV3),
+        #     (self.n_i0_conv3, self.n_cmo - self.i0_conv3_width + 1)).T
+        # self.I0_CONV3_MAX_OUT = self.I0_CONV3_OUT.max(axis=0) + \
+        #     self.I0_CONV3_BIAS
+        # # width-4 convolutions
+        # self.I0_CONV4_OUT = TT.reshape(
+        #     TT.nnet.conv.conv2d(cmo, self.I0_CONV4),
+        #     (self.n_i0_conv4, self.n_cmo - self.i0_conv4_width + 1)).T
+        # self.I0_CONV4_MAX_OUT = self.I0_CONV4_OUT.max(axis=0) + \
+        #     self.I0_CONV4_BIAS
+        # # width-5 convolutions
+        # self.I0_CONV5_OUT = TT.reshape(
+        #     TT.nnet.conv.conv2d(cmo, self.I0_CONV5),
+        #     (self.n_i0_conv5, self.n_cmo - self.i0_conv5_width + 1)).T
+        # self.I0_CONV5_MAX_OUT = self.I0_CONV5_OUT.max(axis=0) + \
+        #     self.I0_CONV5_BIAS
+        # # uniting convolutions
+        # i0 = TT.concatenate([self.I0_CONV3_MAX_OUT,
+        #                      self.I0_CONV4_MAX_OUT, self.I0_CONV5_MAX_OUT],
+        #                     axis=1)
+        # self.I0 = TT.tanh(i0[0, :] + self.I0_BIAS)
+        self.I0 = TT.tanh(TT.dot(self.CMO, self.CMO2I0) + self.I0_BIAS)
         _params = [self.EMB, self.CONV3, self.CONV4, self.CONV5,
                    self.CONV3_BIAS, self.CONV4_BIAS, self.CONV5_BIAS,
-                   self.I0_BIAS]
-                   # self.CMO2I0, self.I0_BIAS]
-        _params += [self.I0_CONV3, self.I0_CONV3_BIAS,
-                    self.I0_CONV4, self.I0_CONV4_BIAS,
-                    self.I0_CONV5, self.I0_CONV5_BIAS]
-        self._pretrain(self.I0, a_balance, _params, self.n_i0_conv)
+                   self.CMO2I0, self.I0_BIAS]
+        # used for convolutions
+        # _params += [self.I0_CONV3, self.I0_CONV3_BIAS,
+        #             self.I0_CONV4, self.I0_CONV4_BIAS,
+        #             self.I0_CONV5, self.I0_CONV5_BIAS]
+        # self._pretrain(self.I0, a_balance, _params, self.n_i0_conv)
+        self._pretrain(self.I0, a_balance, _params)
         self.I1 = TT.nnet.sigmoid(TT.dot(self.I0[0, :], self.I02I1) +
                                   self.I1_BIAS)
         _params += [self.I02I1, self.I1_BIAS]
-        self._pretrain(self.I1, a_balance, _params, self.n_i0_conv)
+        # self._pretrain(self.I1, a_balance, _params, self.n_i0_conv)
+        self._pretrain(self.I1, a_balance, _params)
 
     def _i12y(self):
         """Compute output from intermediate layer
@@ -1371,13 +1375,13 @@ class RNNModel(object):
         (void)
 
         """
-        # mapping from convolutions to output
-        self.I12Y = theano.shared(value=HE_UNIFORM.sample(
-            (self.n_i0_conv, self.n_labels)),
-            name="I02Y")
-        # self.I12Y = theano.shared(value=HE_UNIFORM.sample((self.n_cmo,
-        #                                                    self.n_labels)),
-        #                           name="I02Y")
+        # # mapping from convolutions to output
+        # self.I12Y = theano.shared(value=HE_UNIFORM.sample(
+        #     (self.n_i0_conv, self.n_labels)),
+        #     name="I02Y")
+        self.I12Y = theano.shared(value=HE_UNIFORM.sample((self.n_cmo,
+                                                           self.n_labels)),
+                                  name="I02Y")
         # output bias
         self.Y_BIAS = theano.shared(value=HE_UNIFORM.sample(
             (1, self.n_labels)).flatten(), name="Y_BIAS")
