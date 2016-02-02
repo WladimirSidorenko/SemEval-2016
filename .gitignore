@@ -58,3 +58,5 @@ target/
 cripts/models/*.npy
 scripts/models/*.npy
 src/hello-world
+diff.txt
+errors.txt
