@@ -29,8 +29,9 @@ import sys
 
 ##################################################################
 # Variables and Constants
-DFLT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", \
-                                   "sentiment.model")
+DFLT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "models",
+                               "sentiment.model")
+
 
 ##################################################################
 # Class
@@ -45,7 +46,7 @@ class SentimentClassifier(object):
 
     """
 
-    def __init__(self, a_path = DFLT_MODEL_PATH):
+    def __init__(self, a_path=DFLT_MODEL_PATH):
         """Class constructor.
 
         @param a_path - path to pre-trained model (or None if no model exists)
@@ -56,14 +57,15 @@ class SentimentClassifier(object):
             self.debug = self._invalid_func
         else:
             if not os.path.isfile(a_path) or not os.access(a_path, os.R_OK):
-                raise RuntimeError("Can't create model from file {:s}".format(a_path))
+                raise RuntimeError(
+                    "Can't create model from file {:s}".format(a_path))
             with open(a_path, "rb") as ifile:
                 self.model = load(ifile)
             self.predict = self._predict
             self.debug = self._debug
 
-    def train(self, a_train_set, a_path = DFLT_MODEL_PATH, \
-              a_dev_set = None, **a_kwargs):
+    def train(self, a_train_set, a_path=DFLT_MODEL_PATH,
+              a_dev_set=None, **a_kwargs):
         """Train model and store it at specified path.
 
         @param a_train_set - training set with examples and classes
@@ -79,8 +81,10 @@ class SentimentClassifier(object):
 
         a_path = os.path.abspath(a_path)
         if (os.path.exists(a_path) and not os.access(a_path, os.W_OK)) or \
-                (not os.path.exists(a_path) and not os.access(os.path.dirname(a_path), os.W_OK)):
-            raise RuntimeError("Can't create model at specified path: '{:s}'".format(a_path))
+                (not os.path.exists(a_path) and
+                 not os.access(os.path.dirname(a_path), os.W_OK)):
+            raise RuntimeError(
+                "Can't create model at specified path: '{:s}'".format(a_path))
         # create and train an RNN model
         imodel = RNNModel()
         imodel.fit(a_train_set, a_path, a_dev_set, **a_kwargs)
