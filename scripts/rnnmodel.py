@@ -40,7 +40,7 @@ import theano
 ##################################################################
 # Variables and Constants
 INF = float("inf")
-SEED = 3
+SEED = None
 RELU_ALPHA = 0.
 HE_NORMAL = HeNormal()
 HE_UNIFORM = HeUniform()
@@ -64,9 +64,8 @@ BINOMI_NEG_XTRM = 0.112337
 # probability of adding an exclamation mark to extreme instance
 BINOMI_EXCL_MARK = 0.3
 
-# CORPUS_PROPORTION_MAX = 0.95
-CORPUS_PROPORTION_MAX = 1.1
-CORPUS_PROPORTION_MIN = 0.47
+CORPUS_PROPORTION_MAX = 0.33
+CORPUS_PROPORTION_MIN = 0.2
 RESAMPLE_AFTER = 35
 INCR_SAMPLE_AFTER = 150
 MAX_PRE_ITERS = RESAMPLE_AFTER * 15
@@ -366,7 +365,7 @@ def _rndm_add(a_ts, a_lex, a_rnn, a_p_add, a_p_xtrm, a_tag, a_tag_xtrm=None):
         if xtrm_tag:
             while np.random.binomial(1, BINOMI_EXCL_MARK, 1):
                 x += '!'
-        print("*** sampled {:s} with tag {:s}".format(repr(x), y))
+        # print("*** sampled {:s} with tag {:s}".format(repr(x), y))
         x, y = a_rnn._digitize_feats([(x, y)])[0]
         a_ts.append((np.asarray(x, dtype="int32"),
                      np.asarray(y, dtype="int32")))
@@ -397,9 +396,8 @@ def _get_ts_samples(a_class2idx, a_icnt, a_min,
     n = 0
     nsamples = None
     for v in a_class2idx.itervalues():
-        nsamples = np.random.choice(v, min(float((a_icnt + 1) * 0.5) *
-                                           CORPUS_PROPORTION_MAX * a_min,
-                                           len(v)), replace=False)
+        nsamples = np.random.choice(v, CORPUS_PROPORTION_MIN * a_min,
+                                    replace=False)
         n = len(nsamples)
         samples.extend(nsamples[n*a_set_apart:])
     return samples
@@ -548,7 +546,7 @@ class RNNModel(object):
         # map from hidden layer to output and bias for the output layer
         self.I0 = self.I1 = self.Y = None
         self.I0_BIAS = self.I1_BIAS = self.Y_BIAS = None
-        # the remianing parameters will be initialized immediately
+        # some parameters will be initialized immediately
         self._init_params()
 
     def fit(self, a_trainset, a_path, a_devset=None, **a_kwargs):
@@ -574,8 +572,6 @@ class RNNModel(object):
         for w, lbl in a_trainset:
             labels.add(lbl)
             featset.update(w)
-            # append auxiliary items to training instances
-            # w[:0] = [BEG]; w.append(END)
         pos_re, pos = a_kwargs["a_pos"]
         neg_re, neg = a_kwargs["a_neg"]
         featset |= set([c for w in (pos | neg) for c in w])
@@ -626,9 +622,6 @@ class RNNModel(object):
         # initialize convolution layer
         self._emb2conv(self.CHAR_INDICES, _balance)
 
-        # initialize dropout layer
-        # dropout_out = self._init_dropout(lstm_out[-1])
-
         #  mapping from the CMO layer to the intermediate layers
         self._conv2i1(_balance)
 
@@ -642,8 +635,8 @@ class RNNModel(object):
         y = TT.scalar('y', dtype="int32")
 
         # cost gradients and updates
-        cost = -(TT.log(self.Y[0, y])) + \
-            L2 * TT.sum([TT.sum(p**2) for p in self._params])
+        cost = -(TT.log(self.Y[0, y]))  # + \
+            # L2 * TT.sum([TT.sum(p**2) for p in self._params])
 
         # Alternative cost functions (SVM):
         # cost = SVM_C * (TT.max([1 - self.Y[0, y], 0])**2 +
@@ -680,6 +673,8 @@ class RNNModel(object):
             start_time = datetime.utcnow()
             # iterate over the training instances and update weights
             np.random.shuffle(ts)
+            # activate dropout during training
+            self.use_dropout.set_value(1.)
             for x_i, y_i in ts:
                 try:
                     icost += f_grad_shared(x_i, y_i)
@@ -690,6 +685,8 @@ class RNNModel(object):
                     print("x_i =", repr(x_i), file=sys.stderr)
                     print("y_i =", repr(y_i), file=sys.stderr)
                     raise
+            # de-activate dropout during prediction
+            self.use_dropout.set_value(0.)
             # update train costs
             if icost < min_train_cost:
                 min_train_cost = icost
@@ -925,8 +922,7 @@ class RNNModel(object):
         ################
         # CONVOLUTIONS #
         ################
-        # three convolutional filters for strides of width 2
-        # four convolutional filters for strides of width 3
+        # 4 convolutional filters of width 3
         self.n_conv3 = 4  # number of filters
         self.conv3_width = 3  # width of stride
         self.CONV3 = theano.shared(value=HE_UNIFORM.sample((self.n_conv3, 1,
@@ -936,8 +932,8 @@ class RNNModel(object):
         self.CONV3_BIAS = theano.shared(value=
                                         HE_UNIFORM.sample((1, self.n_conv3)),
                                         name="CONV3_BIAS")
-        # five convolutional filters for strides of width 4
-        self.n_conv4 = 16  # number of filters
+        # 8 convolutional filters of width 4
+        self.n_conv4 = 8  # number of filters
         self.conv4_width = 4  # width of stride
         self.CONV4 = theano.shared(value=HE_UNIFORM.sample((self.n_conv4, 1,
                                                             self.conv4_width,
@@ -946,8 +942,8 @@ class RNNModel(object):
         self.CONV4_BIAS = theano.shared(value=
                                         HE_UNIFORM.sample((1, self.n_conv4)),
                                         name="CONV4_BIAS")
-        # five convolutional filters for strides of width 4
-        self.n_conv5 = 24  # number of filters
+        # 16 convolutional filters of width 5
+        self.n_conv5 = 16  # number of filters
         self.conv5_width = 5  # width of stride
         self.CONV5 = theano.shared(value=HE_UNIFORM.sample((self.n_conv5, 1,
                                                             self.conv5_width,
@@ -958,38 +954,29 @@ class RNNModel(object):
         # remember parameters to be learned
         self._params += [self.CONV3, self.CONV4, self.CONV5,
                          self.CONV3_BIAS, self.CONV4_BIAS, self.CONV5_BIAS]
+
+        self.n_cmo = self.n_conv3 + self.n_conv4 + self.n_conv5
+
         ############
         # Highways #
         ############
-        self.n_cmo = self.n_conv3 + self.n_conv4 + self.n_conv5
-        # the 1-st highway links character embeddings to the output
-        # self.HW1_TRANS_COEFF = theano.shared(value=_floatX(0.75),
-        # name="HW1_TRANS_COEFF")
-        # self.HW1_TRANS = theano.shared(value=
-        # HE_UNIFORM_RELU.sample((self.vdim, self.n_cmo)), name="HW1_TRANS")
-        # self.HW1_TRANS_BIAS = theano.shared(value =
+        # self.HW2_TRANS_MTX = theano.shared(value=HE_UNIFORM_RELU.sample(
+        #     (self.n_cmo, self.n_cmo)), name="HW2_TRANS_MTX")
+        # self.HW2_TRANS_BIAS = theano.shared(value=
         #                                     HE_UNIFORM_RELU.sample(
-        #                                     (1, self.n_cmo)).flatten(),
-        #                                     name = "HW1_TRANS_BIAS")
-        # self._params += [self.HW1_TRANS_COEFF, self.HW1_TRANS,
-        # self.HW1_TRANS_BIAS]
-        # the 2-nd highway links convolutions to the output
-        self.HW2_TRANS_MTX = theano.shared(value=HE_UNIFORM_RELU.sample(
-            (self.n_cmo, self.n_cmo)), name="HW2_TRANS_MTX")
-        self.HW2_TRANS_BIAS = theano.shared(value=
-                                            HE_UNIFORM_RELU.sample(
-                                                (1, self.n_cmo)).flatten(),
-                                            name="HW2_TRANS_BIAS")
-        self._params += [self.HW2_TRANS_MTX, self.HW2_TRANS_BIAS]
+        #                                         (1, self.n_cmo)).flatten(),
+        #                                     name="HW2_TRANS_BIAS")
+        # self._params += [self.HW2_TRANS_MTX, self.HW2_TRANS_BIAS]
 
         #######
         # CMO #
         #######
         self.CMO_W = theano.shared(value=
-                                   ORTHOGONAL.sample((self.n_cmo, self.n_cmo)),
+                                   HE_UNIFORM_RELU.sample(
+                                       (self.n_cmo, self.n_cmo)),
                                    name="CMO_W")
         self.CMO_BIAS = theano.shared(
-            HE_UNIFORM.sample((1, self.n_cmo)).flatten(),
+            HE_UNIFORM_RELU.sample((1, self.n_cmo)).flatten(),
             name="CMO_BIAS"
         )
         self._params += [self.CMO_W, self.CMO_BIAS]
@@ -1116,20 +1103,22 @@ class RNNModel(object):
         self.CONV_MAX_OUT = TT.concatenate([self.CONV3_MAX_OUT,
                                             self.CONV4_MAX_OUT,
                                             self.CONV5_MAX_OUT], axis=1)[0, :]
-        self.HW2_TRANS = TT.nnet.sigmoid(TT.dot(self.CONV_MAX_OUT,
-                                                self.HW2_TRANS_MTX) +
-                                         self.HW2_TRANS_BIAS)
-        self.HW2_CARRY = self.CONV_MAX_OUT * (1. - self.HW2_TRANS)
-        self._CMO = TT.nnet.relu(TT.dot(self.CONV_MAX_OUT, self.CMO_W) +
-                                 self.CMO_BIAS, alpha=RELU_ALPHA)
-        self.CMO = TT.nnet.sigmoid(self._CMO * self.HW2_TRANS +
-                                   self.HW2_CARRY)
-        # self.CMO = self._CMO
+        # self.HW2_TRANS = TT.nnet.sigmoid(TT.dot(self.CONV_MAX_OUT,
+        #                                         self.HW2_TRANS_MTX) +
+        #                                  self.HW2_TRANS_BIAS)
+        # self.HW2_CARRY = self.CONV_MAX_OUT * (1. - self.HW2_TRANS)
+        # self._CMO = TT.nnet.relu(TT.dot(self.CONV_MAX_OUT, self.CMO_W) +
+        #                          self.CMO_BIAS, alpha=RELU_ALPHA)
+        # self.CMO = TT.nnet.sigmoid(self._CMO * self.HW2_TRANS +
+        #                            self.HW2_CARRY)
+        self.CMO = TT.nnet.relu(TT.dot(self.CONV_MAX_OUT, self.CMO_W) +
+                                self.CMO_BIAS, alpha=RELU_ALPHA)
         # pre-train embeddings/convolutions
         _params = [self.EMB, self.CONV3, self.CONV4, self.CONV5,
                    self.CONV3_BIAS, self.CONV4_BIAS, self.CONV5_BIAS,
-                   self.CMO_W, self.CMO_BIAS, self.HW2_TRANS_MTX,
-                   self.HW2_TRANS_BIAS, self.I12Y, self.Y_BIAS]
+                   self.CMO_W, self.CMO_BIAS, self.I12Y, self.Y_BIAS]
+                   # self.CMO_W, self.CMO_BIAS, self.HW2_TRANS_MTX,
+                   # self.HW2_TRANS_BIAS, self.I12Y, self.Y_BIAS]
         self._pretrain(self.CMO, a_balance, _params, "CMO")
 
     def _conv2i1(self, a_balance):
@@ -1148,13 +1137,21 @@ class RNNModel(object):
         self.I0 = TT.tanh(TT.dot(self.CMO, self.CMO2I0) + self.I0_BIAS)
         _params = [self.EMB, self.CONV3, self.CONV4, self.CONV5,
                    self.CONV3_BIAS, self.CONV4_BIAS, self.CONV5_BIAS,
-                   self.CMO_W, self.CMO_BIAS, self.HW2_TRANS_MTX,
-                   self.HW2_TRANS_BIAS, self.CMO2I0, self.I0_BIAS,
+                   # self.CMO_W, self.CMO_BIAS, self.HW2_TRANS_MTX,
+                   # self.HW2_TRANS_BIAS, self.CMO2I0, self.I0_BIAS,
+                   self.CMO_W, self.CMO_BIAS, self.CMO2I0, self.I0_BIAS,
                    self.I12Y, self.Y_BIAS]
         self._pretrain(self.I0, a_balance, _params, "I1")
-        self.I1 = TT.nnet.sigmoid(TT.dot(self.I0[0, :], self.I02I1) +
-                                  self.I1_BIAS)
+
+        # initialize dropout layer
+        # self.I1 = TT.nnet.sigmoid(TT.dot(self.I0[0, :], self.I02I1) +
+        #                           self.I1_BIAS)
+        # _params += [self.I02I1, self.I1_BIAS]
+        # self._pretrain(self.I1, a_balance, _params, "I1")
+        I1 = TT.nnet.sigmoid(TT.dot(self.I0[0, :], self.I02I1) +
+                             self.I1_BIAS)
         _params += [self.I02I1, self.I1_BIAS]
+        self.I1 = self._init_dropout(I1)
         self._pretrain(self.I1, a_balance, _params, "I1")
 
     def _i12y(self):
@@ -1183,7 +1180,7 @@ class RNNModel(object):
 
         """
         # generator of random numbers
-        trng = RandomStreams(SEED)
+        trng = RandomStreams()
         # the dropout layer itself
         output = TT.switch(self.use_dropout,
                            (a_input * trng.binomial(a_input.shape,
@@ -1281,8 +1278,8 @@ class RNNModel(object):
         y = TT.scalar('y' + a_stage, dtype="int32")
 
         # cost
-        cost = -TT.log(Y[0, y]) + \
-            L2 * TT.sum([TT.sum(p**2) for p in a_params])
+        cost = -TT.log(Y[0, y])  # + \
+            # L2 * TT.sum([TT.sum(p**2) for p in a_params])
         # updates
         gradients = TT.grad(cost, wrt=a_params)
         f_grad_shared, f_update, shared_vars = rmsprop(a_params, gradients,
@@ -1295,6 +1292,7 @@ class RNNModel(object):
         for i in xrange(MAX_PRE_ITERS):
             icost = 0.
             if (i % RESAMPLE_AFTER) == 0:
+                print("Resampled", file=sys.stderr)
                 ts, _ = a_balance(i)
             start_time = datetime.utcnow()
             # iterate over the training instances
