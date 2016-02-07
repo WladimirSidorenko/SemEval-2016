@@ -22,7 +22,7 @@ from __future__ import print_function, unicode_literals
 
 from sentiment_classifier import SentimentClassifier
 from evaluate import evaluate, get_fields, GLD_IDX, TXT_IDX
-from preprocessing import ENCODING, iterlines, _cleanse
+from preprocessing import ENCODING, NONMATCH_RE, iterlines, _cleanse
 
 import argparse
 import codecs
@@ -41,7 +41,6 @@ EVALUATE = "evaluate"
 
 TAB = "\t"
 TAB_RE = re.compile(TAB)
-NONMATCH_RE = re.compile("(?!)")
 
 # Subjectivity Clues Lexicon
 SUBJCL = "SubjectivityClues"
@@ -366,9 +365,9 @@ tweets according to their sentiment polarity""")
             dev_set = _read_dataset([args.dev_set])
         lexica = [_read_lexicon(ilex) for ilex in args.lexicon]
         pos, pos_re, neg, neg_re = _merge_lexica(lexica)
-        classifier.train(_read_dataset(args.files), a_path = args.model, \
-                         a_dev_set = dev_set, a_pos = (pos_re, pos), \
-                         a_neg = (neg_re, neg))
+        classifier.train(_read_dataset(args.files), a_path=args.model,
+                         a_dev_set=dev_set, a_pos_re=pos_re, a_pos=pos,
+                         a_neg_re=neg_re, a_neg=neg)
     elif args.mode == TEST:
         # load model from default location
         y = ""; score = 0.

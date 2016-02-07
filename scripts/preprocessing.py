@@ -58,6 +58,7 @@ AT_RE = re.compile(r"(RT\s+)?[.]?@\S+")
 SSPACE_RE = re.compile(r"\\\s+")
 SPACE_RE = re.compile(r"\s\s+")
 
+NONMATCH_RE = re.compile("(?!)")
 POS_RE = re.compile(r"[\b\A](amazing|better|best|cool|"
                     "fun|fant|good|great|like|love|luv|wow|wonder\b|:\))")
 POS_CHAR = ''

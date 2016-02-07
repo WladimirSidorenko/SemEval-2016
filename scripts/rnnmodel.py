@@ -22,12 +22,15 @@ from __future__ import print_function, unicode_literals
 from charstat import VAR_CHAR_IDX, COR_CHAR_IDX, \
     VAR_MSG_IDX, COR_MSG_IDX, VAR_N_IDX, COR_NMSG_IDX, \
     compute_cnt, compute_stat, compute_cov_cor
+from preprocessing import NONMATCH_RE
+from twokenize import tokenize
+
 from cPickle import dump
 from collections import defaultdict, OrderedDict, Counter
 from copy import deepcopy
 from datetime import datetime
 from evaluate import PRDCT_IDX, TOTAL_IDX
-from itertools import chain
+from itertools import izip_longest
 
 from lasagne.init import HeNormal, HeUniform, Orthogonal
 from theano import config, printing, tensor as TT
@@ -66,9 +69,10 @@ BINOMI_EXCL_MARK = 0.3
 
 CORPUS_PROPORTION_MAX = 0.33
 CORPUS_PROPORTION_MIN = 0.2
+XCHANGERS_MIN = 3
 RESAMPLE_AFTER = 35
 INCR_SAMPLE_AFTER = 150
-MAX_PRE_ITERS = RESAMPLE_AFTER * 15
+MAX_PRE_ITERS = RESAMPLE_AFTER * 7
 MAX_ITERS = RESAMPLE_AFTER * 50
 DS_PRCNT = 0.15
 
@@ -82,6 +86,7 @@ SVM_C = 3e-4
 L1 = 1e-4
 L2 = 1e-5
 L3 = 1e-4
+MIN_T_LEN = 5
 
 # default dimension of input vectors
 VEC_DIM = 32
@@ -205,6 +210,9 @@ def _resample_words(a_rnn, a_dseq, a_seq, a_re, a_words):
             iword = a_words[w_i]
             # estimate the indices for replacement
             istart, iend = imatch.start(1), imatch.end(1)
+            # make sure we fit the width of minimal filter
+            if len(seq) - (iend - istart) + len(iword) < MIN_T_LEN:
+                continue
             istart += delta
             iend += delta
             # do the actual replacement
@@ -213,8 +221,8 @@ def _resample_words(a_rnn, a_dseq, a_seq, a_re, a_words):
             # update the offsets
             delta += len(iword) - (iend - istart)
     if seq != a_seq:
-        print("*** a_seq =", repr(a_seq), file=sys.stderr)
-        print("*** seq =", repr(seq), file=sys.stderr)
+        # print("*** a_seq =", repr(a_seq), file=sys.stderr)
+        # print("*** seq =", repr(seq), file=sys.stderr)
         ldseq = len(a_dseq)
         lseq = len(seq)
         assert ldseq == lseq or (ldseq > lseq and a_dseq[lseq] == 0), \
@@ -302,25 +310,26 @@ def _balance_ts(a_ts, a_min, a_class2idx, a_icnt,
         if a_binom:
             # randomly add a new positive term from the lexicon as a training
             # instance
-            _rndm_add(ts_samples, a_pos, a_rnn, BINOMI_SMPL_POS,
-                      BINOMI_POS_XTRM, "positive")
+            # _rndm_add(ts_samples, a_pos, a_rnn, BINOMI_SMPL_POS,
+            #           BINOMI_POS_XTRM, "positive")
             # randomly add a new negative term from the lexicon as a training
             # instance
-            _rndm_add(ts_samples, a_neg, a_rnn, BINOMI_SMPL_NEG,
-                      BINOMI_NEG_XTRM, "negative")
-            # # randomly replace a sentiment term with a phrase from lexicon
-            # if a_ts[i][-1] not in a_rnn.int2coeff or \
-            #    a_rnn.int2coeff[a_ts[i][-1]] != 0:
-            #     dseq = deepcopy(a_ts[i][0])
-            #     iseq = deepcopy(a_ts_orig[i][0])
-            #     dseq, iseq = _resample_words(a_rnn, dseq, iseq, a_pos_re,
-            #                                  a_pos)
-            #     dseq, _ = _resample_words(a_rnn, dseq, iseq, a_neg_re, a_neg)
-            #     # yield modified instance if it was modified
-            #     if dseq != a_ts[i][0]:
-            #         ts_samples.append((np.asarray(dseq, dtype="int32"),
-            #                            a_ts[i][-1]))
-            #         continue
+            # _rndm_add(ts_samples, a_neg, a_rnn, BINOMI_SMPL_NEG,
+            #           BINOMI_NEG_XTRM, "negative")
+            # randomly replace a sentiment term with a phrase from lexicon
+            dseq = deepcopy(a_ts[i][0])
+            iseq = deepcopy(a_ts_orig[i][0])
+            # sample word from the opposite set and change tag
+            dseq, iseq = _resample_words(a_rnn, dseq, iseq, a_pos_re,
+                                         a_neg)
+            # sample word from the opposite set and change tag
+            dseq, _ = _resample_words(a_rnn, dseq, iseq, a_neg_re, a_pos)
+            # yield modified instance if it was modified
+            if dseq != a_ts[i][0]:
+                # swap the tag as we are changing the classes
+                ts_samples.append((np.asarray(dseq, dtype="int32"),
+                                   0 if a_ts[i][-1] == 1 else 1))
+                continue
         ts_samples.append((np.asarray(a_ts[i][0], dtype="int32"),
                            a_ts[i][-1]))
     return (ts_samples, ds_samples)
@@ -486,8 +495,8 @@ def rmsprop(tparams, grads, x, y, cost):
     f_update = theano.function([], [], updates=updir_new + param_up,
                                on_unused_input='ignore',
                                name='rmsprop_f_update')
-    return f_grad_shared, f_update, (zipped_grads, running_grads,
-                                     running_grads2, updir)
+    return (f_grad_shared, f_update, (zipped_grads, running_grads,
+                                      running_grads2, updir))
 
 
 ##################################################################
@@ -525,61 +534,96 @@ class RNNModel(object):
         self.vdim = a_vdim
         self.n_cmo = 0  # size of output convolutions
         # mapping from symbolic representations to indices
-        self.lbl2int = dict()
+        self.lbl2int = {"positive": 1, "negative": 0}
         self.int2lbl = dict()
         self.int2coeff = dict()
         self.feat2idx = dict()
         # NN parameters to be learned
         self._params = []
+        # subset of parameters pertaining to convolutional layers
+        self._convs = []
         # private prediction function
         self._predict = None
         # the parameters below will be initialized during training
         # matrix of items' embeddings (either words or characters) that
         # serve as input to RNN
-        self.EMB = self.EMB_I = self.CONV_IN = None
-        # output of convolutional layers
-        self.CONV3_OUT = self.CONV4_OUT = self.CONV5_OUT = None
-        # max-sample output of convolutional layers
-        self.CONV3_MAX_OUT = self.CONV4_MAX_OUT = self.CONV5_MAX_OUT = \
+        self.EMB = self.CONV_IN = None
+        # convolutional layers, their outputs, and max-over-time outputs
+        ## convolutions of width 3
+        self.CONV3_P = self.CONV3_P_BIAS = self.CONV3_N = self.CONV3_N_BIAS = \
+            self.CONV3_X = self.CONV3_X_BIAS = None
+        self.CONV3_P_OUT = self.CONV3_P_MAX_OUT = None
+        self.CONV3_N_OUT = self.CONV3_N_MAX_OUT = None
+        self.CONV3_X_OUT = self.CONV3_X_MAX_OUT = None
+        ## convolutions of width 4
+        self.CONV4_P = self.CONV4_P_BIAS = self.CONV4_N = self.CONV4_N_BIAS = \
+            self.CONV4_X = self.CONV4_X_BIAS = None
+        self.CONV4_P_OUT = self.CONV4_P_MAX_OUT = None
+        self.CONV4_N_OUT = self.CONV4_N_MAX_OUT = None
+        self.CONV4_X_OUT = self.CONV4_X_MAX_OUT = None
+        ## convolutions of width 5
+        self.CONV5_P = self.CONV5_P_BIAS = self.CONV5_N = self.CONV5_N_BIAS = \
+            self.CONV5_X = self.CONV5_X_BIAS = None
+        self.CONV5_P_OUT = self.CONV5_P_MAX_OUT = None
+        self.CONV5_N_OUT = self.CONV5_N_MAX_OUT = None
+        self.CONV5_X_OUT = self.CONV5_X_MAX_OUT = None
+        ## final result of convolutions
+        self.CONV_P_OUT = self.CONV_N_OUT = self.CONV_X_OUT = \
             self.CONV_MAX_OUT = None
-        self.CMO2I0 = self.I02I1 = None
-        # map from hidden layer to output and bias for the output layer
-        self.I0 = self.I1 = self.Y = None
-        self.I0_BIAS = self.I1_BIAS = self.Y_BIAS = None
+        # mapping from `CONV_MAX_OUT` to the first hidden layer and its bias
+        # term
+        self.CMO2I0 = self.I0_BIAS = None
+        # mapping from the first hidden layer to the second hidden layer and
+        # its bias term (could be replaced by dropout)
+        self.I02I1 = self.I1_BIAS = None
+        # mapping from the second hidden layer to the output
+        self.I12Y = self.Y_BIAS = None
         # some parameters will be initialized immediately
         self._init_params()
 
-    def fit(self, a_trainset, a_path, a_devset=None, **a_kwargs):
+    def fit(self, a_trainset, a_path, a_devset=None,
+            a_pos_re=NONMATCH_RE, a_pos=set(),
+            a_neg_re=NONMATCH_RE, a_neg=set()):
         """Train RNN model on the training set.
 
         Args:
-          set: a_trainset - trainig set as a list of 2-tuples with
-                            training instances and classes
-          str: a_path - path for storing the best model
-          set: a_devset - development set as a list of 2-tuples with
-                            training instances and classes
-          dict: a_kwargs - additional keyword arguments
+          a_trainset: set
+            trainig set as a list of 2-tuples with training instances and
+            classes
+          a_path: str
+            path for storing the best model
+          a_devset: set
+            development set as a list of 2-tuples with training instances
+            and classes
+          a_pos_re: re
+            regexp matching positive terms
+          a_pos: set
+            set of positive terms
+          a_neg_re: re
+            regexp matching negative terms
+          a_neg: set
+            set of negative terms
 
         Returns:
-          void:
+          (void)
 
         """
         if len(a_trainset) == 0:
             return
-        # estimate the number of distinct features and the longest sequence
+        # estimate the number of distinct features and classes in the corpus
         labels = set()
-        featset = set()
+        feats = set()
         for w, lbl in a_trainset:
             labels.add(lbl)
-            featset.update(w)
-        pos_re, pos = a_kwargs["a_pos"]
-        neg_re, neg = a_kwargs["a_neg"]
-        featset |= set([c for w in (pos | neg) for c in w])
-        pos = list(pos)
-        neg = list(neg)
-        self.V = len(AUX_VEC_KEYS) + len(featset)
-        del featset
+            feats.update(w)
+        # add features from the provided lexica
+        feats |= set([c for w in (a_pos | a_neg) for c in w])
+        pos = list(a_pos)
+        neg = list(a_neg)
+
         self.n_labels = len(labels)
+        self.V = len(AUX_VEC_KEYS) + len(feats)
+        del feats
         # obtain indices for special embeddings (BEGINNING, END, UNKNOWN)
         cnt = 0
         for ikey in AUX_VEC_KEYS:
@@ -587,30 +631,15 @@ class RNNModel(object):
             cnt += 1
         trainset = self._digitize_feats(a_trainset, a_add=True)
 
-        # store indices of particular classes in the training set to ease the
-        # sampling
-        class2indices = defaultdict(list)
-        for i, (_, y_i) in enumerate(trainset):
-            class2indices[y_i].append(i)
-
-        # get the minimum number of instances per class
-        min_items = min(len(v) for v in class2indices.itervalues())
-
-        # convert raw character lists back to strings in the original trainset
+        # convert raw character lists back to strings in the original training
+        # set
         a_trainset = [(''.join(inst), lbl) for inst, lbl in a_trainset]
 
-        # initialize custom function for sampling the corpus
-        _balance = self._get_balance(trainset, min_items,
-                                     class2indices,
-                                     a_trainset, a_devset is None,
-                                     True, pos_re, pos, neg_re, neg
-                                     )
-
-        # Initialize final output layer
+        # initialize final output layer (need to know `n_labels` before doing
+        # so)
         self.I12Y = theano.shared(value=HE_UNIFORM.sample((self.n_cmo,
                                                            self.n_labels)),
                                   name="I12Y")
-        # output bias
         self.Y_BIAS = theano.shared(value=HE_UNIFORM.sample(
             (1, self.n_labels)).flatten(), name="Y_BIAS")
         # add newly initialized weights to the parameters to be trained
@@ -619,8 +648,34 @@ class RNNModel(object):
         # initialize embedding matrix for features
         self._init_emb()
 
-        # initialize convolution layer
-        self._emb2conv(self.CHAR_INDICES, _balance)
+        # initialize convolution layer and obtain additional corpus data
+        dict_ts, dict_ts_str = self._emb2conv(self.CHAR_INDICES,
+                                              a_trainset=a_trainset,
+                                              a_pos_re=a_pos_re, a_pos=a_pos,
+                                              a_neg_re=a_neg_re, a_neg=a_neg
+                                              )
+        trainset += dict_ts
+        a_trainset += dict_ts_str
+        # store indices of class instances present in the training set to ease
+        # the sampling
+        class2indices = defaultdict(list)
+        for i, (_, y_i) in enumerate(trainset):
+            class2indices[y_i].append(i)
+
+        # get the minimum number of instances per class
+        min_items = min(len(v) for v in class2indices.itervalues())
+
+        # initialize custom function for sampling the corpus
+        _balance = self._get_balance(trainset, min_items,
+                                     class2indices,
+                                     a_trainset, a_devset is None,
+                                     True, a_pos_re, pos, a_neg_re, neg
+                                     )
+        # pre-train the CMO layer on an enriched corpus
+        _params = self._convs + [self.EMB, self.CMO_W, self.CMO_BIAS,
+                                 self.I12Y, self.Y_BIAS]
+        # perform standard pre-training
+        self._pretrain(self.CMO, _balance, _params, "CMO")
 
         #  mapping from the CMO layer to the intermediate layers
         self._conv2i1(_balance)
@@ -635,8 +690,8 @@ class RNNModel(object):
         y = TT.scalar('y', dtype="int32")
 
         # cost gradients and updates
-        cost = -(TT.log(self.Y[0, y]))  # + \
-            # L2 * TT.sum([TT.sum(p**2) for p in self._params])
+        cost = y * (1 - self.Y) + (1 - y) * self.Y  # + \
+               # L2 * TT.sum([TT.sum(p**2) for p in self._params])
 
         # Alternative cost functions (SVM):
         # cost = SVM_C * (TT.max([1 - self.Y[0, y], 0])**2 +
@@ -648,7 +703,7 @@ class RNNModel(object):
         f_grad_shared, f_update, _ = rmsprop(self._params, gradients,
                                              self.CHAR_INDICES, y, cost)
 
-        # digitize features in dev set and pre-compute $\rho$ statistics
+        # digitize features in the dev set and pre-compute $\rho$ statistics
         rhostat = defaultdict(lambda: [0, 0])
         if a_devset is not None:
             a_devset = self._digitize_feats(a_devset)
@@ -670,6 +725,13 @@ class RNNModel(object):
             # resample corpus every RESAMPLE_AFTER iteration
             if (i % RESAMPLE_AFTER) == 0:
                 ts, ds = _balance(i)
+                # reset the $\rho$ statistics, if no dedicated development set
+                # was supplied
+                if a_devset is None:
+                    for k in rhostat:
+                        rhostat[k][TOTAL_IDX] = 0
+                    for _, y in ds:
+                        rhostat[y][TOTAL_IDX] += 1
             start_time = datetime.utcnow()
             # iterate over the training instances and update weights
             np.random.shuffle(ts)
@@ -693,11 +755,6 @@ class RNNModel(object):
             # reset the $\rho$ statistics
             for k in rhostat:
                 rhostat[k][PRDCT_IDX] = 0
-            if a_devset is None:
-                for k in rhostat:
-                    rhostat[k][TOTAL_IDX] = 0
-                for _, y in ds:
-                    rhostat[y][TOTAL_IDX] += 1
             # compute the $\rho$ statistics and cross-validation/dev score anew
             dev_score = 0.
             for x_i, y_i in (a_devset or ds):
@@ -768,27 +825,27 @@ class RNNModel(object):
         print("in_len =", repr(in_len))
         print("*** CONVOLUTIONS(3) ***")
         get_conv3 = theano.function([self.CONV_IN, self.IN_LEN],
-                                    [self.CONV3_OUT, self.CONV3_MAX_OUT],
+                                    [self.CONV3_P_OUT, self.CONV3_P_MAX_OUT],
                                     name="get_conv3")
         conv3_out, conv3_max_out = get_conv3(conv_in, in_len)
         _debug_conv(a_seq, self.conv3_width, conv3_out, conv3_max_out)
         print("*** CONVOLUTIONS(4) ***")
         get_conv4 = theano.function([self.CONV_IN, self.IN_LEN],
-                                    [self.CONV4_OUT, self.CONV4_MAX_OUT],
+                                    [self.CONV4_P_OUT, self.CONV4_P_MAX_OUT],
                                     name="get_conv4")
         conv4_out, conv4_max_out = get_conv4(conv_in, in_len)
         _debug_conv(a_seq, self.conv4_width, conv4_out, conv4_max_out)
         print("*** CONVOLUTIONS(5) ***")
         get_conv5 = theano.function([self.CONV_IN, self.IN_LEN],
-                                    [self.CONV5_OUT, self.CONV5_MAX_OUT],
+                                    [self.CONV5_P_OUT, self.CONV5_P_MAX_OUT],
                                     name="get_conv4")
         conv5_out, conv5_max_out = get_conv5(conv_in, in_len)
         _debug_conv(a_seq, self.conv5_width, conv5_out, conv5_max_out)
 
         # concatenated convolution layer
-        get_conv_max_out = theano.function([self.CONV3_MAX_OUT,
-                                            self.CONV4_MAX_OUT,
-                                            self.CONV5_MAX_OUT],
+        get_conv_max_out = theano.function([self.CONV3_P_MAX_OUT,
+                                            self.CONV4_P_MAX_OUT,
+                                            self.CONV5_P_MAX_OUT],
                                            [self.CONV_MAX_OUT],
                                            name="get_conv_max_out")
         conv_max_out = get_conv_max_out(conv3_max_out,
@@ -858,22 +915,25 @@ class RNNModel(object):
         for iseq, ilabel in a_trainset:
             # digitize label and convert it to a vector
             if ilabel is not None:
-                if ilabel not in self.lbl2int:
-                    try:
-                        coeff = int(ilabel)
-                    except (AssertionError, ValueError):
-                        coeff = 1.
-                    self.lbl2int[ilabel] = clabels
-                    self.int2lbl[clabels] = ilabel
-                    self.int2coeff[clabels] = coeff
-                    clabels += 1
-                dint = self.lbl2int[ilabel]
+                if isinstance(ilabel, int):
+                    dlabel = ilabel
+                else:
+                    if ilabel not in self.lbl2int:
+                        try:
+                            coeff = int(ilabel)
+                        except (AssertionError, ValueError):
+                            coeff = 1.
+                        self.lbl2int[ilabel] = clabels
+                        self.int2lbl[clabels] = ilabel
+                        self.int2coeff[clabels] = coeff
+                        clabels += 1
+                    dint = self.lbl2int[ilabel]
+                    dlabel = dint
                 # dlabel = np.zeros(self.n_labels)
                 # dlabel[dint] = 1 * self.int2coeff[dint]
                 # for SVM
                 # dlabel = np.ones(self.n_labels).astype("int32") * -1
                 # dlabel[dint] = 1
-                dlabel = dint
             # convert features to indices and append new training
             # instance
             ret.append((self._feat2idcs(iseq, a_add=a_add), dlabel))
@@ -913,7 +973,9 @@ class RNNModel(object):
     def _init_params(self):
         """Initialize parameters which are independent of the training data.
 
-        @return \c void
+        Returns:
+        --------
+        (void)
 
         """
         # matrix of char vectors, corresponding to single word
@@ -922,51 +984,7 @@ class RNNModel(object):
         ################
         # CONVOLUTIONS #
         ################
-        # 4 convolutional filters of width 3
-        self.n_conv3 = 4  # number of filters
-        self.conv3_width = 3  # width of stride
-        self.CONV3 = theano.shared(value=HE_UNIFORM.sample((self.n_conv3, 1,
-                                                            self.conv3_width,
-                                                            self.vdim)),
-                                   name="CONV3")
-        self.CONV3_BIAS = theano.shared(value=
-                                        HE_UNIFORM.sample((1, self.n_conv3)),
-                                        name="CONV3_BIAS")
-        # 8 convolutional filters of width 4
-        self.n_conv4 = 8  # number of filters
-        self.conv4_width = 4  # width of stride
-        self.CONV4 = theano.shared(value=HE_UNIFORM.sample((self.n_conv4, 1,
-                                                            self.conv4_width,
-                                                            self.vdim)),
-                                   name="CONV4")
-        self.CONV4_BIAS = theano.shared(value=
-                                        HE_UNIFORM.sample((1, self.n_conv4)),
-                                        name="CONV4_BIAS")
-        # 16 convolutional filters of width 5
-        self.n_conv5 = 16  # number of filters
-        self.conv5_width = 5  # width of stride
-        self.CONV5 = theano.shared(value=HE_UNIFORM.sample((self.n_conv5, 1,
-                                                            self.conv5_width,
-                                                            self.vdim)),
-                                   name="CONV5")
-        self.CONV5_BIAS = theano.shared(value=HE_UNIFORM.sample(
-            (1, self.n_conv5)), name="CONV5_BIAS")
-        # remember parameters to be learned
-        self._params += [self.CONV3, self.CONV4, self.CONV5,
-                         self.CONV3_BIAS, self.CONV4_BIAS, self.CONV5_BIAS]
-
-        self.n_cmo = self.n_conv3 + self.n_conv4 + self.n_conv5
-
-        ############
-        # Highways #
-        ############
-        # self.HW2_TRANS_MTX = theano.shared(value=HE_UNIFORM_RELU.sample(
-        #     (self.n_cmo, self.n_cmo)), name="HW2_TRANS_MTX")
-        # self.HW2_TRANS_BIAS = theano.shared(value=
-        #                                     HE_UNIFORM_RELU.sample(
-        #                                         (1, self.n_cmo)).flatten(),
-        #                                     name="HW2_TRANS_BIAS")
-        # self._params += [self.HW2_TRANS_MTX, self.HW2_TRANS_BIAS]
+        self._init_convs()
 
         #######
         # CMO #
@@ -1005,6 +1023,107 @@ class RNNModel(object):
         # DROPOUT #
         ###########
         self.use_dropout = theano.shared(_floatX(1.))
+
+    def _init_convs(self):
+        """Initialize convolution layers.
+
+        Returns:
+        --------
+        (void)
+
+        """
+        # convolutions of width 3
+        self.n_conv3 = 4  # number of filters
+        self.conv3_width = 3  # width of stride
+        ## positive convolutions
+        self.CONV3_P, self.CONV3_P_BIAS = self._init_conv_layer(
+            self.n_conv3, self.conv3_width, self.vdim, "CONV3_P",
+            "CONV3_P_BIAS"
+        )
+        ## negative convolutions
+        self.CONV3_N, self.CONV3_N_BIAS = self._init_conv_layer(
+            self.n_conv3, self.conv3_width, self.vdim, "CONV3_N",
+            "CONV3_N_BIAS"
+        )
+        ## mirror convolutions
+        self.CONV3_X, self.CONV3_X_BIAS = self._init_conv_layer(
+            self.n_conv3, self.conv3_width, self.vdim, "CONV3_X",
+            "CONV3_X_BIAS"
+        )
+
+        # convolutions of width 4
+        self.n_conv4 = 8        # number of filters
+        self.conv4_width = 4    # width of stride
+        ## positive convolutions
+        self.CONV4_P, self.CONV4_P_BIAS = self._init_conv_layer(
+            self.n_conv4, self.conv4_width, self.vdim, "CONV4_P",
+            "CONV4_P_BIAS"
+        )
+        ## negative convolutions
+        self.CONV4_N, self.CONV4_N_BIAS = self._init_conv_layer(
+            self.n_conv4, self.conv4_width, self.vdim, "CONV4_N",
+            "CONV4_N_BIAS"
+        )
+        ## mirror convolutions
+        self.CONV4_X, self.CONV4_X_BIAS = self._init_conv_layer(
+            self.n_conv4, self.conv4_width, self.vdim, "CONV4_X",
+            "CONV4_X_BIAS"
+        )
+
+        # convolutions of width 5
+        self.n_conv5 = 12       # number of filters
+        self.conv5_width = MIN_T_LEN    # width of stride (5)
+        ## positive convolutions
+        self.CONV5_P, self.CONV5_P_BIAS = self._init_conv_layer(
+            self.n_conv5, self.conv5_width, self.vdim, "CONV5_P",
+            "CONV5_P_BIAS"
+        )
+        ## negative convolutions
+        self.CONV5_N, self.CONV5_N_BIAS = self._init_conv_layer(
+            self.n_conv5, self.conv5_width, self.vdim, "CONV5_N",
+            "CONV5_N_BIAS"
+        )
+        ## mirror convolutions
+        self.CONV5_X, self.CONV5_X_BIAS = self._init_conv_layer(
+            self.n_conv5, self.conv5_width, self.vdim, "CONV5_X",
+            "CONV5_X_BIAS"
+        )
+        # size of output layer
+        self.n_cmo = self.n_conv3 + self.n_conv4 + self.n_conv5
+
+    def _init_conv_layer(self, a_n_filters, a_width, a_in_dim,
+                         a_layer_name, a_bias_name):
+        """Initialize single convolution layer.
+
+        Args:
+        -----
+        a_n_filters: int
+          number of filters
+        a_width: int
+          width of a single filter
+        a_in_dim: int
+          dimensionality of input vectors
+        a_layer_name: str
+          name for the new convolutional tensor
+        a_bias_name: str
+          name for the bias vector associated with the given layer
+
+        Returns:
+        --------
+        tuple(theano.shared, theano.shared):
+          2-tuple with convolutional tensor (collection of filters) and bias
+          term
+
+        """
+        layer = theano.shared(value=HE_UNIFORM.sample((a_n_filters, 1,
+                                                       a_width,
+                                                       a_in_dim)),
+                              name=a_layer_name)
+        bias = theano.shared(value=HE_UNIFORM.sample((1, a_n_filters)),
+                             name=a_bias_name)
+        self._params += [layer, bias]
+        self._convs += [layer, bias]
+        return (layer, bias)
 
     def _init_emb(self, a_ts=None):
         """Initialize embeddings.
@@ -1061,20 +1180,21 @@ class RNNModel(object):
         # add embeddings to the parameters to be trained
         self._params.append(self.EMB)
 
-    def _emb2conv(self, a_x, a_balance):
+    def _emb2conv(self, a_x, **a_kwargs):
         """Compute convolutions from indices
 
         Args:
         -----
         a_x: theano.variable
           indices of embeddings
-        a_balance: lambda(int)
-          custom function for balancing training set
+        a_kwargs: dict
+          additional keyword arguments to be passed to pre-training of
+          convolutions
 
         Returns:
         --------
-        theano.variable:
-          max convolutions computed from these indices
+        (list(tuple(str, int)), list(tuple(nd.array, int))):
+          digitized and original training sets generated from lexicons
 
         """
         # length of character input
@@ -1082,44 +1202,81 @@ class RNNModel(object):
         # input to convolutional layer
         self.CONV_IN = self.EMB[a_x].reshape((1, 1, self.IN_LEN, self.vdim))
         # width-3 convolutions
-        self.CONV3_OUT = TT.reshape(TT.nnet.conv.conv2d(self.CONV_IN,
-                                                        self.CONV3),
-                                    (self.n_conv3, self.IN_LEN -
-                                     self.conv3_width + 1)).T
-        self.CONV3_MAX_OUT = self.CONV3_OUT.max(axis=0) + self.CONV3_BIAS
+        self.CONV3_P_OUT, self.CONV3_P_MAX_OUT = \
+            self._get_conv_max_out(self.CONV3_P, self.CONV3_P_BIAS,
+                                   self.n_conv3, self.conv3_width)
+        self.CONV3_N_OUT, self.CONV3_N_MAX_OUT = \
+            self._get_conv_max_out(self.CONV3_N, self.CONV3_N_BIAS,
+                                   self.n_conv3, self.conv3_width)
+        self.CONV3_X_OUT, self.CONV3_X_MAX_OUT = \
+            self._get_conv_max_out(self.CONV3_X, self.CONV3_X_BIAS,
+                                   self.n_conv3, self.conv3_width)
         # width-4 convolutions
-        self.CONV4_OUT = TT.reshape(TT.nnet.conv.conv2d(self.CONV_IN,
-                                                        self.CONV4),
-                                    (self.n_conv4, self.IN_LEN -
-                                     self.conv4_width + 1)).T
-        self.CONV4_MAX_OUT = self.CONV4_OUT.max(axis=0) + self.CONV4_BIAS
+        self.CONV4_P_OUT, self.CONV4_P_MAX_OUT = \
+            self._get_conv_max_out(self.CONV4_P, self.CONV4_P_BIAS,
+                                   self.n_conv4, self.conv4_width)
+        self.CONV4_N_OUT, self.CONV4_N_MAX_OUT = \
+            self._get_conv_max_out(self.CONV4_N, self.CONV4_N_BIAS,
+                                   self.n_conv4, self.conv4_width)
+        self.CONV4_X_OUT, self.CONV4_X_MAX_OUT = \
+            self._get_conv_max_out(self.CONV4_X, self.CONV4_X_BIAS,
+                                   self.n_conv4, self.conv4_width)
         # width-5 convolutions
-        self.CONV5_OUT = TT.reshape(TT.nnet.conv.conv2d(self.CONV_IN,
-                                                        self.CONV5),
-                                    (self.n_conv5, self.IN_LEN -
-                                     self.conv5_width + 1)).T
-        self.CONV5_MAX_OUT = self.CONV5_OUT.max(axis=0) + self.CONV5_BIAS
-        # output convolutions
-        self.CONV_MAX_OUT = TT.concatenate([self.CONV3_MAX_OUT,
-                                            self.CONV4_MAX_OUT,
-                                            self.CONV5_MAX_OUT], axis=1)[0, :]
-        # self.HW2_TRANS = TT.nnet.sigmoid(TT.dot(self.CONV_MAX_OUT,
-        #                                         self.HW2_TRANS_MTX) +
-        #                                  self.HW2_TRANS_BIAS)
-        # self.HW2_CARRY = self.CONV_MAX_OUT * (1. - self.HW2_TRANS)
-        # self._CMO = TT.nnet.relu(TT.dot(self.CONV_MAX_OUT, self.CMO_W) +
-        #                          self.CMO_BIAS, alpha=RELU_ALPHA)
-        # self.CMO = TT.nnet.sigmoid(self._CMO * self.HW2_TRANS +
-        #                            self.HW2_CARRY)
+        self.CONV5_P_OUT, self.CONV5_P_MAX_OUT = \
+            self._get_conv_max_out(self.CONV5_P, self.CONV5_P_BIAS,
+                                   self.n_conv5, self.conv5_width)
+        self.CONV5_N_OUT, self.CONV5_N_MAX_OUT = \
+            self._get_conv_max_out(self.CONV5_N, self.CONV5_N_BIAS,
+                                   self.n_conv5, self.conv5_width)
+        self.CONV5_X_OUT, self.CONV5_X_MAX_OUT = \
+            self._get_conv_max_out(self.CONV5_X, self.CONV5_X_BIAS,
+                                   self.n_conv5, self.conv5_width)
+        # resulting polarity convolutions
+        self.CONV_P_OUT = TT.concatenate([self.CONV3_P_MAX_OUT,
+                                          self.CONV4_P_MAX_OUT,
+                                          self.CONV5_P_MAX_OUT], axis=1)[0, :]
+        self.CONV_N_OUT = TT.concatenate([self.CONV3_N_MAX_OUT,
+                                          self.CONV4_N_MAX_OUT,
+                                          self.CONV5_N_MAX_OUT], axis=1)[0, :]
+        self.CONV_X_OUT = TT.concatenate([self.CONV3_X_MAX_OUT,
+                                          self.CONV4_X_MAX_OUT,
+                                          self.CONV5_X_MAX_OUT], axis=1)[0, :]
+
+        self.CONV_MAX_OUT = TT.nnet.sigmoid(self.CONV_P_OUT -
+                                            self.CONV_N_OUT) * \
+            -TT.tanh(self.CONV_X_OUT)
+        # initialize and pre-train embeddings/convolutions
         self.CMO = TT.nnet.relu(TT.dot(self.CONV_MAX_OUT, self.CMO_W) +
                                 self.CMO_BIAS, alpha=RELU_ALPHA)
         # pre-train embeddings/convolutions
-        _params = [self.EMB, self.CONV3, self.CONV4, self.CONV5,
-                   self.CONV3_BIAS, self.CONV4_BIAS, self.CONV5_BIAS,
-                   self.CMO_W, self.CMO_BIAS, self.I12Y, self.Y_BIAS]
-                   # self.CMO_W, self.CMO_BIAS, self.HW2_TRANS_MTX,
-                   # self.HW2_TRANS_BIAS, self.I12Y, self.Y_BIAS]
-        self._pretrain(self.CMO, a_balance, _params, "CMO")
+        return self._pretrain_emb_convs(**a_kwargs)
+
+    def _get_conv_max_out(self, a_conv_layer, a_conv_bias, a_n_filters,
+                          a_width):
+        """Obtain single conv max out layer.
+
+        Args:
+        -----
+        a_conv_layer: theano.variable
+          layer of convolution filters
+        a_conv_bias: theano.variable
+          bias term for the output convolutions
+        a_n_filters: int
+          number of convolution filters
+        a_width: int
+          filter width
+
+        Returns:
+        --------
+        tuple(theano.shared, theano.shared):
+          conv-out and conv-max-out layers
+
+        """
+        conv_out = TT.reshape(TT.nnet.conv.conv2d(self.CONV_IN,
+                                                  a_conv_layer),
+                              (a_n_filters, self.IN_LEN - a_width + 1)).T
+        conv_max_out = conv_out.max(axis=0) + a_conv_bias
+        return (conv_out, conv_max_out)
 
     def _conv2i1(self, a_balance):
         """Compute intermediate layers from character convolutions
@@ -1135,13 +1292,9 @@ class RNNModel(object):
 
         """
         self.I0 = TT.tanh(TT.dot(self.CMO, self.CMO2I0) + self.I0_BIAS)
-        _params = [self.EMB, self.CONV3, self.CONV4, self.CONV5,
-                   self.CONV3_BIAS, self.CONV4_BIAS, self.CONV5_BIAS,
-                   # self.CMO_W, self.CMO_BIAS, self.HW2_TRANS_MTX,
-                   # self.HW2_TRANS_BIAS, self.CMO2I0, self.I0_BIAS,
-                   self.CMO_W, self.CMO_BIAS, self.CMO2I0, self.I0_BIAS,
-                   self.I12Y, self.Y_BIAS]
-        self._pretrain(self.I0, a_balance, _params, "I1")
+        _params = [self.CMO_W, self.CMO_BIAS, self.CMO2I0, self.I0_BIAS,
+                   self.I12Y, self.Y_BIAS, self.EMB] + self._convs
+        self._pretrain(self.I0, a_balance, _params, "I0")
 
         # initialize dropout layer
         # self.I1 = TT.nnet.sigmoid(TT.dot(self.I0[0, :], self.I02I1) +
@@ -1166,8 +1319,8 @@ class RNNModel(object):
         (void)
 
         """
-        self.Y = TT.nnet.softmax(TT.dot(self.I1, self.I12Y) +
-                                 self.Y_BIAS)
+        self.Y = TT.nnet.sigmoid(TT.sum(TT.dot(self.I1, self.I12Y) +
+                                        self.Y_BIAS))
 
     def _init_dropout(self, a_input):
         """Create a dropout layer.
@@ -1200,10 +1353,9 @@ class RNNModel(object):
         if self._predict is None:
             # deactivate dropout when using the model
             self.use_dropout.set_value(0.)
-            self.y_pred = TT.argmax(self.Y, axis=1)
             self._predict = theano.function([self.CHAR_INDICES],
-                                            [self.y_pred,
-                                             self.Y[0, self.y_pred]],
+                                            [self.Y >= 0.5,
+                                             self.Y],
                                             name="predict")
 
     def _get_balance(self, a_ts, a_min, a_class2idcs,
@@ -1249,6 +1401,142 @@ class RNNModel(object):
             return (ts, ds)
         # return defined function
         return _balance
+
+    def _pretrain_emb_convs(self, a_trainset, a_pos_re, a_pos,
+                            a_neg_re, a_neg):
+        """Pre-train embeddings and convolutions using a shortened NN.
+
+        Args:
+        -----
+        a_trainset: set
+          trainig set as a list of 2-tuples with training instances as strings
+          and their classes
+        a_pos_re: re
+          regexp matching positive terms
+        a_pos: set(str)
+          set of positive terms
+        a_pos_re: re
+          regexp matching negative terms
+        a_neg: set(str)
+          set of negative terms
+
+        Returns:
+        --------
+        (list(tuple(str, int)), list(tuple(nd.array, int))):
+          digitized and original training sets generated from lexicons
+
+        """
+        # obtain neutral and exchanger terms
+        words = set()
+        neutrals = set()
+        xchangers = Counter()
+        polar_terms = a_pos | a_neg
+        for t, y in a_trainset:
+            words.update(tokenize(t))
+            if y == "positive":
+                if words & a_neg:
+                    xchangers.update(words - polar_terms)
+                elif words & a_pos:
+                    neutrals |= words - polar_terms
+            else:
+                if words & a_pos:
+                    xchangers.update(words - polar_terms)
+                elif words & a_neg:
+                    neutrals |= words - polar_terms
+            words.clear()
+        # generate xchangers from frequent terms that appear in mixed polarity
+        # items
+        xchangers = set(k for k, v in xchangers.iteritems() if v >
+                        XCHANGERS_MIN)
+
+        # create training sets of positive, negative, and exchanger terms
+        pos_ts = self._dict2ts(a_pos, a_neg | neutrals | xchangers)
+        neg_ts = self._dict2ts(a_neg, a_pos | neutrals | xchangers)
+        xchng_ts = self._dict2ts(xchangers, a_pos | a_neg | neutrals,
+                                 a_pos_tag=1, a_neg_tag=-1)
+        # generate enriched compositionality corpus
+        xchangers = list(xchangers)
+        enriched_ts_orig = [(x, 1) for x in a_pos] + \
+                           [(x, 0) for x in a_neg] + \
+                           [(np.random.choice(xchangers, 1)[0] + ' ' + x, 0)
+                            for x in a_pos]
+        enriched_ts = self._digitize_feats(enriched_ts_orig, a_add=True)
+
+        # obtain base parameters which are shared by all functions
+        base_params = [self.EMB]
+        # obtain parameters specific to each particular classifier
+        pos_params = base_params + [self.CONV3_P, self.CONV3_P_BIAS,
+                                    self.CONV4_P, self.CONV4_P_BIAS,
+                                    self.CONV5_P, self.CONV5_P_BIAS]
+        neg_params = base_params + [self.CONV3_N, self.CONV3_N_BIAS,
+                                    self.CONV4_N, self.CONV4_N_BIAS,
+                                    self.CONV5_N, self.CONV5_N_BIAS]
+        xchng_params = base_params + [self.CONV3_X, self.CONV3_X_BIAS,
+                                      self.CONV4_X, self.CONV4_X_BIAS,
+                                      self.CONV5_X, self.CONV5_X_BIAS]
+        # create custom predicition and training functions and parameter sets
+        pos_cost, pos_update, pos_shared = self._get_cost_update_shared(
+            self.CONV_P_OUT, pos_params)
+        neg_cost, neg_update, neg_shared = self._get_cost_update_shared(
+            self.CONV_N_OUT, neg_params)
+        xchng_cost, xchng_update, xchng_shared = self._get_cost_update_shared(
+            self.CONV_X_OUT, xchng_params, a_dec_func=TT.tanh,
+            a_cost=lambda y, pred: (y - pred)**2)
+        # update convolutions and mebeddings
+        time_delta = 0.
+        start_time = end_time = None
+        cost_pos = cost_neg = cost_xchng = 0.
+        for i in xrange(RESAMPLE_AFTER):
+            # reset the counters
+            cost_pos = cost_neg = cost_xchng = 0.
+            # reshuffle training sets
+            np.random.shuffle(pos_ts)
+            np.random.shuffle(neg_ts)
+            np.random.shuffle(xchng_ts)
+            # perform actual training
+            start_time = datetime.utcnow()
+            for ipos, ineg, ixchng in izip_longest(pos_ts, neg_ts, xchng_ts):
+                if ipos is not None:
+                    cost_pos += pos_cost(*ipos)
+                    pos_update()
+                if ineg is not None:
+                    cost_neg += neg_cost(*ineg)
+                    neg_update()
+                if ixchng is not None:
+                    cost_xchng += xchng_cost(*ixchng)
+                    xchng_update()
+            end_time = datetime.utcnow()
+            time_delta = (end_time - start_time).seconds
+            print("Pre-training iteration (CONV) #{:d}: "
+                  "pos_train_cost = {:.10f}, neg_train_cost = {:.10f}, "
+                  "xchng_train_cost = {:.10f} ({:.2f} sec);".format(
+                      i, cost_pos, cost_neg, cost_xchng, time_delta),
+                  file=sys.stderr)
+        # clean up memory occupied by shared variables
+        self._cleanup(pos_shared)
+        self._cleanup(neg_shared)
+        self._cleanup(xchng_shared)
+        # free some memory
+        del xchng_ts[:]
+        del neg_ts[:]
+        # pre-train compositional function
+        cmo_params = [self.EMB, self.CMO_W, self.CMO_BIAS] + self._convs
+        cmo_cost, cmo_update, cmo_shared = self._get_cost_update_shared(
+            self.CMO, cmo_params)
+        cost = 0.
+        for i in xrange(RESAMPLE_AFTER):
+            cost = 0.
+            for x, y in enriched_ts:
+                cost += cmo_cost(x, y)
+                cmo_update()
+            end_time = datetime.utcnow()
+            time_delta = (end_time - start_time).seconds
+            print("Pre-training iteration (CMO) #{:d}: "
+                  "cost = {:.10f} ({:.2f} sec);".format(i, cost, time_delta),
+                  file=sys.stderr)
+        self._cleanup(cmo_shared)
+        # return generated training sets
+        return enriched_ts, enriched_ts_orig
 
     def _pretrain(self, a_x, a_balance, a_params, a_stage="", a_idim=None):
         """Pre-train embeddings and convolutions using a shortened NN.
@@ -1318,8 +1606,87 @@ class RNNModel(object):
                 break
             prev_cost = icost
         # clean up memory occupied by shared variables
+        self._cleanup(shared_vars)
+
+    def _dict2ts(self, a_pos, a_neg, a_pos_tag=1, a_neg_tag=0):
+        """Generate corpus of positive and negative instances.
+
+        Args:
+        -----
+        a_pos: set(str)
+          set of positive instances
+        a_neg: set(str)
+          set of negative instances
+        a_pos_tag: int
+          tag to be assigned to positive instances
+        a_neg_tag: int
+          tag to be assigned to positive instances
+
+        Returns:
+        --------
+        list(tuple(np.array, np.array))
+          newly constructed training set
+
+        """
+        res = []
+        x = y = None
+        # add positive instances
+        for w in a_pos:
+            x, y = self._digitize_feats([(w, a_pos_tag)])[0]
+            res.append((np.asarray(x, dtype="int32"),
+                        np.asarray(y, dtype="int32")))
+        # add negative instances
+        for w in a_neg:
+            x, y = self._digitize_feats([(w, a_neg_tag)])[0]
+            res.append((np.asarray(x, dtype="int32"),
+                        np.asarray(y, dtype="int32")))
+        return res
+
+    def _get_cost_update_shared(self, a_x, a_params,
+                                a_dec_func=TT.nnet.sigmoid,
+                                a_cost=lambda y, pred:
+                                y * (1 - pred) + (1 - y) * pred):
+        """Obtain cost and update functions and shared variables.
+
+        Args:
+        -----
+        a_x: theano.shared
+          input layer used for prediction
+        a_params: list(theano.shared)
+          list of input parameters affecting prediction
+        a_dec_func: list(theano.shared)
+          list of input parameters affecting prediction
+
+        Returns:
+        --------
+        3-tuple: cost function, update function, shared variables
+
+        """
+        # gold label
+        y = TT.scalar('y', dtype="int32")
+        # classifier's prediction
+        pred = a_dec_func(TT.sum(a_x))
+        # prediction cost
+        cost = a_cost(y, pred)
+        gradients = TT.grad(cost, wrt=a_params)
+        # generate cost and update and set of shared vars
+        return rmsprop(a_params, gradients, self.CHAR_INDICES, y, cost)
+
+    def _cleanup(self, a_shared_vars):
+        """Clean-up memory occupied by shared variables.
+
+        Args:
+        -----
+        a_shared_vars: list(theano.shared)
+          list of shared variables whose memory should be freed
+
+        Returns:
+        --------
+        (void)
+
+        """
         dim = 0
-        for var_list in shared_vars:
+        for var_list in a_shared_vars:
             for v in var_list:
                 dim = len(v.shape.eval())
                 v.set_value(np.zeros([0] * dim).astype(config.floatX))
