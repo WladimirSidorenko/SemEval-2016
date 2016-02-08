@@ -783,7 +783,9 @@ class RNNModel(object):
         # a_seq[:0] = [BEG]; a_seq.append(END)
         self._activate_predict()
         y, score = self._predict(self._feat2idcs(a_seq))
-        self.int2lbl = {1: "positive", 0: "negative"}
+        # uncomment the following line in order to use the official serialized
+        # model
+        # self.int2lbl = {1: "positive", 0: "negative"}
         return (self.int2lbl[int(y)], score)
 
     def debug(self, a_seq):
