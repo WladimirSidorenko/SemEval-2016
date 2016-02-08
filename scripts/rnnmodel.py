@@ -72,7 +72,7 @@ CORPUS_PROPORTION_MIN = 0.2
 XCHANGERS_MIN = 3
 RESAMPLE_AFTER = 35
 INCR_SAMPLE_AFTER = 150
-MAX_PRE_ITERS = RESAMPLE_AFTER * 7
+MAX_PRE_ITERS = RESAMPLE_AFTER * 5
 MAX_ITERS = RESAMPLE_AFTER * 50
 DS_PRCNT = 0.15
 
@@ -310,12 +310,12 @@ def _balance_ts(a_ts, a_min, a_class2idx, a_icnt,
         if a_binom:
             # randomly add a new positive term from the lexicon as a training
             # instance
-            # _rndm_add(ts_samples, a_pos, a_rnn, BINOMI_SMPL_POS,
-            #           BINOMI_POS_XTRM, "positive")
+            _rndm_add(ts_samples, a_pos, a_rnn, BINOMI_SMPL_POS,
+                      BINOMI_POS_XTRM, "positive")
             # randomly add a new negative term from the lexicon as a training
             # instance
-            # _rndm_add(ts_samples, a_neg, a_rnn, BINOMI_SMPL_NEG,
-            #           BINOMI_NEG_XTRM, "negative")
+            _rndm_add(ts_samples, a_neg, a_rnn, BINOMI_SMPL_NEG,
+                      BINOMI_NEG_XTRM, "negative")
             # randomly replace a sentiment term with a phrase from lexicon
             dseq = deepcopy(a_ts[i][0])
             iseq = deepcopy(a_ts_orig[i][0])
@@ -535,7 +535,7 @@ class RNNModel(object):
         self.n_cmo = 0  # size of output convolutions
         # mapping from symbolic representations to indices
         self.lbl2int = {"positive": 1, "negative": 0}
-        self.int2lbl = dict()
+        self.int2lbl = {v: k for k, v in self.lbl2int.iteritems()}
         self.int2coeff = dict()
         self.feat2idx = dict()
         # NN parameters to be learned
@@ -635,27 +635,6 @@ class RNNModel(object):
         # set
         a_trainset = [(''.join(inst), lbl) for inst, lbl in a_trainset]
 
-        # initialize final output layer (need to know `n_labels` before doing
-        # so)
-        self.I12Y = theano.shared(value=HE_UNIFORM.sample((self.n_cmo,
-                                                           self.n_labels)),
-                                  name="I12Y")
-        self.Y_BIAS = theano.shared(value=HE_UNIFORM.sample(
-            (1, self.n_labels)).flatten(), name="Y_BIAS")
-        # add newly initialized weights to the parameters to be trained
-        self._params += [self.I12Y, self.Y_BIAS]
-
-        # initialize embedding matrix for features
-        self._init_emb()
-
-        # initialize convolution layer and obtain additional corpus data
-        dict_ts, dict_ts_str = self._emb2conv(self.CHAR_INDICES,
-                                              a_trainset=a_trainset,
-                                              a_pos_re=a_pos_re, a_pos=a_pos,
-                                              a_neg_re=a_neg_re, a_neg=a_neg
-                                              )
-        trainset += dict_ts
-        a_trainset += dict_ts_str
         # store indices of class instances present in the training set to ease
         # the sampling
         class2indices = defaultdict(list)
@@ -671,12 +650,24 @@ class RNNModel(object):
                                      a_trainset, a_devset is None,
                                      True, a_pos_re, pos, a_neg_re, neg
                                      )
-        # pre-train the CMO layer on an enriched corpus
-        _params = self._convs + [self.EMB, self.CMO_W, self.CMO_BIAS,
-                                 self.I12Y, self.Y_BIAS]
-        # perform standard pre-training
-        self._pretrain(self.CMO, _balance, _params, "CMO")
+        # initialize final output layer (we need to know `n_labels` before we
+        # do so)
+        self.I12Y = theano.shared(value=HE_UNIFORM.sample((self.n_cmo,
+                                                           self.n_labels)),
+                                  name="I12Y")
+        self.Y_BIAS = theano.shared(value=HE_UNIFORM.sample(
+            (1, self.n_labels)).flatten(), name="Y_BIAS")
+        # add newly initialized weights to the parameters to be trained
+        self._params += [self.I12Y, self.Y_BIAS]
 
+        # initialize embedding matrix for features
+        self._init_emb()
+
+        # initialize convolution layer and obtain additional corpus data
+        self._emb2conv(self.CHAR_INDICES, _balance, a_trainset=a_trainset,
+                       a_pos_re=a_pos_re, a_pos=a_pos,
+                       a_neg_re=a_neg_re, a_neg=a_neg
+                       )
         #  mapping from the CMO layer to the intermediate layers
         self._conv2i1(_balance)
 
@@ -792,6 +783,7 @@ class RNNModel(object):
         # a_seq[:0] = [BEG]; a_seq.append(END)
         self._activate_predict()
         y, score = self._predict(self._feat2idcs(a_seq))
+        self.int2lbl = {1: "positive", 0: "negative"}
         return (self.int2lbl[int(y)], score)
 
     def debug(self, a_seq):
@@ -1180,13 +1172,15 @@ class RNNModel(object):
         # add embeddings to the parameters to be trained
         self._params.append(self.EMB)
 
-    def _emb2conv(self, a_x, **a_kwargs):
+    def _emb2conv(self, a_x, a_balance, **a_kwargs):
         """Compute convolutions from indices
 
         Args:
         -----
         a_x: theano.variable
           indices of embeddings
+        a_balance: lambda
+          function for resampling the corpus
         a_kwargs: dict
           additional keyword arguments to be passed to pre-training of
           convolutions
@@ -1245,11 +1239,15 @@ class RNNModel(object):
         self.CONV_MAX_OUT = TT.nnet.sigmoid(self.CONV_P_OUT -
                                             self.CONV_N_OUT) * \
             -TT.tanh(self.CONV_X_OUT)
+        _params = [self.EMB, self.I12Y, self.Y_BIAS] + self._convs
+        self._pretrain(self.CONV_MAX_OUT, a_balance, _params, "CONV_MAX_OUT")
         # initialize and pre-train embeddings/convolutions
         self.CMO = TT.nnet.relu(TT.dot(self.CONV_MAX_OUT, self.CMO_W) +
                                 self.CMO_BIAS, alpha=RELU_ALPHA)
-        # pre-train embeddings/convolutions
-        return self._pretrain_emb_convs(**a_kwargs)
+        _params += [self.CMO_W, self.CMO_BIAS]
+        self._pretrain(self.CMO, a_balance, _params, "CMO")
+        # # pre-train embeddings/convolutions
+        # return self._pretrain_emb_convs(**a_kwargs)
 
     def _get_conv_max_out(self, a_conv_layer, a_conv_bias, a_n_filters,
                           a_width):

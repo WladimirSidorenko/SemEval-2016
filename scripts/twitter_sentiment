@@ -33,7 +33,7 @@ import sys
 ##################################################################
 # Variables and Constants
 # index of the topic field in the test file
-TEST_TOPIC_IDX = 0
+TEST_TOPIC_IDX = 1
 
 TRAIN = "train"
 TEST = "test"
