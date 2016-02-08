@@ -60,3 +60,6 @@ scripts/models/*.npy
 src/hello-world
 diff.txt
 errors.txt
+data/train/
+data/dev/
+data/trial/
