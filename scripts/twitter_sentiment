@@ -349,6 +349,8 @@ tweets according to their sentiment polarity""")
                              action = "store_true")
     test_parser.add_argument("-v", "--verbose", help = "output scores along with predicted labels",
                              action = "store_true")
+    test_parser.add_argument("--scikit", help = "use supervised scikit classifier istead of deep",
+                             action = "store_true")
     _add_cmn_options(test_parser)
     # evaluation options (train and test at the same time)
     ev_parser = subparsers.add_parser(EVALUATE, help = "evaluate trained model")

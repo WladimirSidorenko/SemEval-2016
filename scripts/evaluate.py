@@ -55,19 +55,19 @@ TOPIC_IDX = 0
 ##################################################################
 # Methods
 def translate_tag(a_tag):
-    """Convert symbolic tag to int.
+    """Convert string tag to an integer.
 
     @param a_tag - tag to convert
 
-    @return int representing the tag
+    @return int representation of the tag
 
     """
+    a_tag = a_tag.lower()
     if a_tag == "positive":
         return 1
     elif a_tag == "negative":
         return 0
-    else:
-        return int(a_tag)
+    return int(a_tag)
 
 
 def get_fields(a_line):

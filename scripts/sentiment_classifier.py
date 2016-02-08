@@ -33,6 +33,10 @@ DFLT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "models",
                                "sentiment.model")
 
 
+RNN = 0
+SCIKIT = 1
+
+
 ##################################################################
 # Class
 class SentimentClassifier(object):
@@ -46,15 +50,21 @@ class SentimentClassifier(object):
 
     """
 
-    def __init__(self, a_path=DFLT_MODEL_PATH):
+    def __init__(self, a_path=DFLT_MODEL_PATH, a_type=RNN):
         """Class constructor.
 
         @param a_path - path to pre-trained model (or None if no model exists)
+        @param a_type - model type to use or tain
+
         """
         if a_path is None:
             self.model = None
             self.predict = self._invalid_func
-            self.debug = self._invalid_func
+            self.type = a_type
+            if self.type == RNN:
+                from rnnmodel import RNNModel
+            else:
+                from sckmodel import SCKModel
         else:
             if not os.path.isfile(a_path) or not os.access(a_path, os.R_OK):
                 raise RuntimeError(
@@ -86,8 +96,13 @@ class SentimentClassifier(object):
             raise RuntimeError(
                 "Can't create model at specified path: '{:s}'".format(a_path))
         # create and train an RNN model
-        imodel = RNNModel()
-        imodel.fit(a_train_set, a_path, a_dev_set, **a_kwargs)
+        if self.type == RNN:
+            imodel = RNNModel()
+            imodel.fit(a_train_set, a_path, a_dev_set, **a_kwargs)
+        else:
+            imodel = SCKModel()
+            imodel.fit(a_train_set)
+
         # remember model as instance attribute
         self.model = imodel
         # self.predict = self._predict
@@ -121,4 +136,3 @@ class SentimentClassifier(object):
 
         """
         raise RuntimeError("Model is not trained.")
-
