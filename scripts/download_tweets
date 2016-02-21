@@ -21,10 +21,9 @@ ENCODING = "utf-8"
 SPACES_RE = re.compile(r"\s\s+")
 TAB_RE = re.compile(r"\t+")
 RS_RE = re.compile(r"[\r\n]+")
-# My authentication data
-# Authentication data of Alan Ritter
-# CONSUMER_KEY = r"JEdRRoDsfwzCtupkir4ivQ"
-# CONSUMER_SECRET = r"PAbSSmzQxbcnkYYH2vQpKVSq2yPARfKm0Yl6DrLc"
+# Authentication data of Alan Ritter (provide your own instead)
+CONSUMER_KEY = r"JEdRRoDsfwzCtupkir4ivQ"
+CONSUMER_SECRET = r"PAbSSmzQxbcnkYYH2vQpKVSq2yPARfKm0Yl6DrLc"
 
 ##################################################################
 # Methods
