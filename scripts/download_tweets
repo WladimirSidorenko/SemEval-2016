@@ -22,8 +22,6 @@ SPACES_RE = re.compile(r"\s\s+")
 TAB_RE = re.compile(r"\t+")
 RS_RE = re.compile(r"[\r\n]+")
 # My authentication data
-CONSUMER_KEY = r"RPdBGuLluj0IdWv8OWE7lQ"
-CONSUMER_SECRET = r"vKyITMoNNcZnXEim87pLaoun1Y5cZRQbrmxaqj9StZ0"
 # Authentication data of Alan Ritter
 # CONSUMER_KEY = r"JEdRRoDsfwzCtupkir4ivQ"
 # CONSUMER_SECRET = r"PAbSSmzQxbcnkYYH2vQpKVSq2yPARfKm0Yl6DrLc"
