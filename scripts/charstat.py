@@ -107,7 +107,6 @@ def compute_cnt(a_it, a_n_char=1):
         cls_cnt[icls][TTL_MSG_IDX] += 1.
         cls_cnt[icls][TTL_CHAR_IDX] += len(itext) - a_n_char + 1.
         # update character statistics
-        print("itext =", repr(itext), file=sys.stderr)
         iCounter.update(_iterchars(itext, a_n_char))
         for ichar, icnt in iCounter.iteritems():
             char_cnt[ichar][icls][icnt] += 1.
@@ -396,25 +395,25 @@ character n-grams characteristic to specific sentiment classes.""")
         print("{:10s}{:-10.4f}{:-15.4f}".format(icls, *istat))
     print()
     # output char statistics
-    print("{:8s}{:13s}{:13s}{:13s}{:10s}{:13s}{:11s}{:16s}{:13s}".format(
-        "Char", "Char Cnt", "Char Prob",
-        "Char Var", "Msg Cnt", "Msg Prob",
-        "Msg Var", "Mean # in Msg", "Var # in Msg"))
-    for ichar, icharstat in char_stat.iteritems():
-        print("{:8s}{:8.0f}{:13f}{:13f}{:10.0f}{:13f}{:13f}"
-              "{:13f}{:13f}".format(ichar, *icharstat))
-    print()
+    # print("{:8s}{:13s}{:13s}{:13s}{:10s}{:13s}{:11s}{:16s}{:13s}".format(
+    #     "Char", "Char Cnt", "Char Prob",
+    #     "Char Var", "Msg Cnt", "Msg Prob",
+    #     "Msg Var", "Mean # in Msg", "Var # in Msg"))
+    # for ichar, icharstat in char_stat.iteritems():
+    #     print("{:8s}{:8.0f}{:13f}{:13f}{:10.0f}{:13f}{:13f}"
+    #           "{:13f}{:13f}".format(ichar, *icharstat))
+    # print()
 
     # compute covariance, correlations
     cov_cor = compute_cov_cor(cls_stat, char_stat, char_cls_stat)
     # compute and output class-character covariance statistics
-    print("{:10s}{:8s}{:16s}{:16s}{:16s}{:16s}{:16s}{:16s}".format(
+    print("{:s}\t{:s}\t{:s}\t{:s}\t{:s}\t{:s}\t{:s}\t{:s}".format(
         "X", "Y", "COV_{char}[XY]", "COR_{char}[XY]",
         "COV_{msg}[XY]", "COR_{msg}[XY]",
         "COV_{n_msg}[XY]", "COR_{n_msg}[XY]"))
     for ichar, icharstat in cov_cor.iteritems():
         for icls, iclstat in icharstat.iteritems():
-            print("{:7s}{:8s}{:16f}{:15f}{:16f}{:15f}{:16f}{:16f}".format(
+            print("{:s}\t{:s}\t{:f}\t{:f}\t{:f}\t{:f}\t{:f}\t{:f}".format(
                 ichar, icls, *iclstat))
     # print("***char_cnt =", repr(char_cnt), file=sys.stderr)
     # print("*** cls_stat =", repr(cls_stat), file=sys.stderr)

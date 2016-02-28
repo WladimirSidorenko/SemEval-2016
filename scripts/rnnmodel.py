@@ -69,8 +69,8 @@ CORPUS_PROPORTION_MAX = 1.1
 CORPUS_PROPORTION_MIN = 0.47
 RESAMPLE_AFTER = 35
 INCR_SAMPLE_AFTER = 150
-MAX_PRE_ITERS = RESAMPLE_AFTER * 15
-MAX_ITERS = RESAMPLE_AFTER * 60
+MAX_PRE_ITERS = RESAMPLE_AFTER * 1  # 15
+MAX_ITERS = RESAMPLE_AFTER * 10  # 60
 DS_PRCNT = 0.15
 
 # default training parameters
@@ -306,33 +306,49 @@ def _balance_ts(a_ts, a_min, a_class2idx, a_icnt,
             # randomly add a new positive term from the lexicon as a training
             # instance
             _rndm_add(ts_samples, a_pos, a_rnn, BINOMI_SMPL_POS,
-                      BINOMI_POS_XTRM, "1", "2")
+                      BINOMI_POS_XTRM, "positive")
             # randomly add a new negative term from the lexicon as a training
             # instance
             _rndm_add(ts_samples, a_neg, a_rnn, BINOMI_SMPL_NEG,
-                      BINOMI_NEG_XTRM, "-1", "-2")
+                      BINOMI_NEG_XTRM, "negative")
             # randomly replace a sentiment term with a phrase from lexicon
-            if a_ts[i][-1] not in a_rnn.int2coeff or \
-               a_rnn.int2coeff[a_ts[i][-1]] != 0:
-                dseq = deepcopy(a_ts[i][0])
-                iseq = deepcopy(a_ts_orig[i][0])
-                dseq, iseq = _resample_words(a_rnn, dseq, iseq, a_pos_re,
-                                             a_pos)
-                dseq, _ = _resample_words(a_rnn, dseq, iseq, a_neg_re, a_neg)
-                # yield modified instance if it was modified
-                if dseq != a_ts[i][0]:
-                    ts_samples.append((np.asarray(dseq, dtype="int32"),
-                                       a_ts[i][-1]))
-                    continue
-            ts_samples.append((np.asarray(a_ts[i][0], dtype="int32"),
-                               a_ts[i][-1]))
-        else:
-            ts_samples.append((np.asarray(a_ts[i][0], dtype="int32"),
-                               a_ts[i][-1]))
+            dseq = deepcopy(a_ts[i][0])
+            iseq = deepcopy(a_ts_orig[i][0])
+            # sample word from the opposite set and change tag
+            dseq, iseq = _resample_words(a_rnn, dseq, iseq, a_pos_re,
+                                         a_neg)
+            # sample word from the opposite set and change tag
+            dseq, _ = _resample_words(a_rnn, dseq, iseq, a_neg_re, a_pos)
+            # yield modified instance if it was modified
+            if dseq != a_ts[i][0]:
+                # swap the tag as we are changing the classes
+                ts_samples.append((np.asarray(dseq, dtype="int32"),
+                                   0 if a_ts[i][-1] == 1 else 1))
+                continue
+        ts_samples.append((np.asarray(a_ts[i][0], dtype="int32"),
+                           a_ts[i][-1]))
+
+            # if a_ts[i][-1] not in a_rnn.int2coeff or \
+            #    a_rnn.int2coeff[a_ts[i][-1]] != 0:
+            #     dseq = deepcopy(a_ts[i][0])
+            #     iseq = deepcopy(a_ts_orig[i][0])
+            #     dseq, iseq = _resample_words(a_rnn, dseq, iseq, a_pos_re,
+            #                                  a_pos)
+            #     dseq, _ = _resample_words(a_rnn, dseq, iseq, a_neg_re, a_neg)
+            #     # yield modified instance if it was modified
+            #     if dseq != a_ts[i][0]:
+            #         ts_samples.append((np.asarray(dseq, dtype="int32"),
+            #                            a_ts[i][-1]))
+            #         continue
+            # ts_samples.append((np.asarray(a_ts[i][0], dtype="int32"),
+            #                    a_ts[i][-1]))
+        # else:
+        #     ts_samples.append((np.asarray(a_ts[i][0], dtype="int32"),
+        #                        a_ts[i][-1]))
     return (ts_samples, ds_samples)
 
 
-def _rndm_add(a_ts, a_lex, a_rnn, a_p_add, a_p_xtrm, a_tag, a_tag_xtrm):
+def _rndm_add(a_ts, a_lex, a_rnn, a_p_add, a_p_xtrm, a_tag, a_tag_xtrm=None):
     """Randomly add a subjective term from the lexicon.
 
     Args:
@@ -359,7 +375,7 @@ def _rndm_add(a_ts, a_lex, a_rnn, a_p_add, a_p_xtrm, a_tag, a_tag_xtrm):
 
     """
     xtrm_tag = False
-    if np.random.binomial(1, a_p_add, 1):
+    if a_tag_xtrm is not None and np.random.binomial(1, a_p_add, 1):
         x_i = np.random.randint(0, len(a_lex), 1)
         if np.random.binomial(1, a_p_xtrm, 1):
             xtrm_tag = True
@@ -684,7 +700,7 @@ class RNNModel(object):
             cnt += 1
         trainset = self._digitize_feats(a_trainset, a_add=True)
 
-        # store indices of particular classes in the training set to ease the
+        # store indices of particular classes in the training set to ease
         # sampling
         class2indices = defaultdict(list)
         for i, (_, y_i) in enumerate(trainset):
@@ -709,9 +725,6 @@ class RNNModel(object):
         # initialize convolution layer
         self._emb2conv(self.CHAR_INDICES, _balance)
 
-        # initialize dropout layer
-        # dropout_out = self._init_dropout(lstm_out[-1])
-
         #  mapping from the CMO layer to the intermediate layers
         self._conv2i1(_balance)
 
@@ -725,13 +738,14 @@ class RNNModel(object):
         y = TT.scalar('y', dtype="int32")
 
         # distance function (used for 5-class prediction)
-        dist = (self.int2coeff_th[y] - self.int2coeff_th[self.y_pred])[0]**2
-        compute_dist = theano.function([self.CHAR_INDICES, y], [dist],
-                                       name="compute_dist")
+        # dist = (self.int2coeff_th[y] - self.int2coeff_th[self.y_pred])[0]**2
+        # compute_dist = theano.function([self.CHAR_INDICES, y], [dist],
+        #                                name="compute_dist")
 
         # cost gradients and updates
-        cost = -(TT.log(self.Y[0, y])) + L3 * dist + \
-            L2 * TT.sum([TT.sum(p**2) for p in self._params])
+        cost = y * (1. - self.Y) + self.Y * (1. - y)
+        # cost = -(TT.log(self.Y[0, y])) + L3 * dist + \
+        #     L2 * TT.sum([TT.sum(p**2) for p in self._params])
 
         # Alternative cost functions (SVM):
         # cost = SVM_C * (TT.max([1 - self.Y[0, y], 0])**2 +
@@ -812,26 +826,27 @@ class RNNModel(object):
                     rhostat[k][TOTAL_IDX] = 0
                 for _, y in ds:
                     rhostat[y][TOTAL_IDX] += 1
-            # compute the $\rho$ statistics and cross-validation/dev score anew
+            # compute the $\rho$ statistics and cross-validation/dev scores
+            # anew
             dev_score = 0.
             for x_i, y_i in (a_devset or ds):
                 y_pred_i = self._predict(x_i)[0]
                 rhostat[y_i][PRDCT_IDX] += (y_pred_i == y_i)
-                dev_score += float(abs(self.int2coeff[y_i] -
-                                       self.int2coeff[y_pred_i[0]])) / \
-                    rhostat[y_i][TOTAL_IDX]
-                dev_stat = [float(v[PRDCT_IDX])/float(v[TOTAL_IDX] or 1.)
-                            for v in rhostat.itervalues()]
-                # (used for two-class prediction)
-                # dev_score = sum(dev_stat) / float(len(rhostat) or 1)
-                # if dev_score > max_dev_score:
-                #     self._dump(a_path)
-                #     max_dev_score = dev_score
-                # (used for five-class prediction)
-            if dev_score < min_dev_score:
+                # dev_score += float(abs(self.int2coeff[y_i] -
+                #                        self.int2coeff[y_pred_i[0]])) / \
+                #     rhostat[y_i][TOTAL_IDX]
+            dev_stat = [float(v[PRDCT_IDX])/float(v[TOTAL_IDX] or 1.)
+                        for v in rhostat.itervalues()]
+            # (used for two-class prediction)
+            dev_score = sum(dev_stat) / float(len(rhostat) or 1)
+            if dev_score > max_dev_score:
                 self._dump(a_path)
-                # for five-class prediction, we use the minimum
-                min_dev_score = dev_score
+                max_dev_score = dev_score
+            # # (used for five-class prediction)
+            # if dev_score < min_dev_score:
+            #     self._dump(a_path)
+            #     # for five-class prediction, we use the minimum
+            #     min_dev_score = dev_score
             end_time = datetime.utcnow()
             time_delta = (end_time - start_time).seconds
             print("dev_stat =", repr(dev_stat), file=sys.stderr)
@@ -842,9 +857,8 @@ class RNNModel(object):
                 break
             prev_cost = icost
         print("Minimum train cost = {:.10f}, "
-              "minimum dev error rate = {:.10f}".format(min_train_cost,
-                                                        min_dev_score /
-                                                        self.n_labels))
+              "maximum dev score = {:.10f}".format(min_train_cost,
+                                                   max_dev_score))
         return icost
 
     def predict(self, a_seq):
@@ -1375,20 +1389,23 @@ class RNNModel(object):
         (void)
 
         """
+        # initialize dropout layer
+        self.I1 = self._init_dropout(self.I1)
+
         # # mapping from convolutions to output
         # self.I12Y = theano.shared(value=HE_UNIFORM.sample(
         #     (self.n_i0_conv, self.n_labels)),
         #     name="I02Y")
         self.I12Y = theano.shared(value=HE_UNIFORM.sample((self.n_cmo,
                                                            self.n_labels)),
-                                  name="I02Y")
+                                  name="I12Y")
         # output bias
         self.Y_BIAS = theano.shared(value=HE_UNIFORM.sample(
             (1, self.n_labels)).flatten(), name="Y_BIAS")
         # add newly initialized weights to the parameters to be trained
         self._params += [self.I12Y, self.Y_BIAS]
-        self.Y = TT.nnet.softmax(TT.dot(self.I1, self.I12Y) +
-                                 self.Y_BIAS)
+        self.Y = TT.nnet.sigmoid(TT.sum(TT.dot(self.I1, self.I12Y) +
+                                        self.Y_BIAS))
 
     def _init_dropout(self, a_input):
         """Create a dropout layer.
@@ -1421,10 +1438,9 @@ class RNNModel(object):
         if self._predict is None:
             # deactivate dropout when using the model
             self.use_dropout.set_value(0.)
-            self.y_pred = TT.argmax(self.Y, axis=1)
             self._predict = theano.function([self.CHAR_INDICES],
-                                            [self.y_pred,
-                                             self.Y[0, self.y_pred]],
+                                            [self.Y >= 0.5,
+                                             self.Y],
                                             name="predict")
 
     def _get_balance(self, a_ts, a_min, a_class2idcs,

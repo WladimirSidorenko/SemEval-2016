@@ -71,13 +71,11 @@ def _safe_sub(a_re, a_sub, a_line):
     """Perform substitution on line and return it unchanged if line gets empty
 
     Args:
-    -----
       a_re - regular expression to substitue
       a_sub - substitution
       a_line - line where the substitution should be done
 
     Returns:
-    --------
       (str): line with substitutions or unchanged line if it got empty
 
     """
@@ -95,7 +93,8 @@ def _cleanse(a_line, a_topic=""):
     """
     global TOPIC2RE
     # print("original line =", repr(a_line), file = sys.stderr)
-    line = _safe_sub(HTTP_RE, "", a_line.lower())
+    # line = _safe_sub(HTTP_RE, "", a_line.lower())
+    line = _safe_sub(HTTP_RE, "", a_line)
     line = _safe_sub(AT_RE, "", line)
     line = _safe_sub(DIGIT_RE, "", line)
     line = _safe_sub(AMP_RE, "", line)
