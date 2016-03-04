@@ -72,8 +72,8 @@ CORPUS_PROPORTION_MIN = 0.2
 XCHANGERS_MIN = 3
 RESAMPLE_AFTER = 35
 INCR_SAMPLE_AFTER = 150
-MAX_PRE_ITERS = RESAMPLE_AFTER * 5
-MAX_ITERS = RESAMPLE_AFTER * 50
+MAX_PRE_ITERS = RESAMPLE_AFTER * 1  # 5
+MAX_ITERS = RESAMPLE_AFTER * 10  # 50
 DS_PRCNT = 0.15
 
 # default training parameters
@@ -311,25 +311,27 @@ def _balance_ts(a_ts, a_min, a_class2idx, a_icnt,
             # randomly add a new positive term from the lexicon as a training
             # instance
             _rndm_add(ts_samples, a_pos, a_rnn, BINOMI_SMPL_POS,
-                      BINOMI_POS_XTRM, "positive")
+                      BINOMI_POS_XTRM, "1", "2")
             # randomly add a new negative term from the lexicon as a training
             # instance
             _rndm_add(ts_samples, a_neg, a_rnn, BINOMI_SMPL_NEG,
-                      BINOMI_NEG_XTRM, "negative")
+                      BINOMI_NEG_XTRM, "-1", "-2")
             # randomly replace a sentiment term with a phrase from lexicon
-            dseq = deepcopy(a_ts[i][0])
-            iseq = deepcopy(a_ts_orig[i][0])
-            # sample word from the opposite set and change tag
-            dseq, iseq = _resample_words(a_rnn, dseq, iseq, a_pos_re,
-                                         a_neg)
-            # sample word from the opposite set and change tag
-            dseq, _ = _resample_words(a_rnn, dseq, iseq, a_neg_re, a_pos)
-            # yield modified instance if it was modified
-            if dseq != a_ts[i][0]:
-                # swap the tag as we are changing the classes
-                ts_samples.append((np.asarray(dseq, dtype="int32"),
-                                   0 if a_ts[i][-1] == 1 else 1))
-                continue
+            if a_ts[i][-1] not in a_rnn.int2coeff or \
+               a_rnn.int2coeff[a_ts[i][-1]] != 0:
+                dseq = deepcopy(a_ts[i][0])
+                iseq = deepcopy(a_ts_orig[i][0])
+                # sample word from the opposite set and change tag
+                dseq, iseq = _resample_words(a_rnn, dseq, iseq, a_pos_re,
+                                             a_neg)
+                # sample word from the opposite set and change tag
+                dseq, _ = _resample_words(a_rnn, dseq, iseq, a_neg_re, a_pos)
+                # yield modified instance if it was modified
+                if dseq != a_ts[i][0]:
+                    # swap the tag as we are changing the classes
+                    ts_samples.append((np.asarray(dseq, dtype="int32"),
+                                       0 if a_ts[i][-1] == 1 else 1))
+                    continue
         ts_samples.append((np.asarray(a_ts[i][0], dtype="int32"),
                            a_ts[i][-1]))
     return (ts_samples, ds_samples)
@@ -534,8 +536,8 @@ class RNNModel(object):
         self.vdim = a_vdim
         self.n_cmo = 0  # size of output convolutions
         # mapping from symbolic representations to indices
-        self.lbl2int = {"positive": 1, "negative": 0}
-        self.int2lbl = {v: k for k, v in self.lbl2int.iteritems()}
+        self.lbl2int = {}  # {"positive": 1, "negative": 0}
+        self.int2lbl = {}  # {v: k for k, v in self.lbl2int.iteritems()}
         self.int2coeff = dict()
         self.feat2idx = dict()
         # NN parameters to be learned
@@ -681,8 +683,10 @@ class RNNModel(object):
         y = TT.scalar('y', dtype="int32")
 
         # cost gradients and updates
-        cost = y * (1 - self.Y) + (1 - y) * self.Y  # + \
+        # cost = y * (1 - self.Y) + (1 - y) * self.Y  # + \
                # L2 * TT.sum([TT.sum(p**2) for p in self._params])
+        cost = -(TT.log(self.Y[0, y])) + L2 * TT.sum([TT.sum(p**2)
+                                                      for p in self._params])
 
         # Alternative cost functions (SVM):
         # cost = SVM_C * (TT.max([1 - self.Y[0, y], 0])**2 +
@@ -709,7 +713,7 @@ class RNNModel(object):
         # for two-class classification, we try to maximize the average $\rho$
         max_dev_score = -INF
         # for five-class classification, we try to minimize the mean error rate
-        dev_score = icost = prev_cost = min_train_cost = INF
+        dev_score = min_dev_score = icost = prev_cost = min_train_cost = INF
         print("lbl2int =", repr(self.lbl2int), file=sys.stderr)
         for i in xrange(MAX_ITERS):
             icost = 0.
@@ -727,7 +731,7 @@ class RNNModel(object):
             # iterate over the training instances and update weights
             np.random.shuffle(ts)
             # activate dropout during training
-            self.use_dropout.set_value(1.)
+            # self.use_dropout.set_value(1.)
             for x_i, y_i in ts:
                 try:
                     icost += f_grad_shared(x_i, y_i)
@@ -739,25 +743,33 @@ class RNNModel(object):
                     print("y_i =", repr(y_i), file=sys.stderr)
                     raise
             # de-activate dropout during prediction
-            self.use_dropout.set_value(0.)
+            # self.use_dropout.set_value(0.)
             # update train costs
             if icost < min_train_cost:
                 min_train_cost = icost
             # reset the $\rho$ statistics
             for k in rhostat:
                 rhostat[k][PRDCT_IDX] = 0
+            if a_devset is None:
+                for k in rhostat:
+                    rhostat[k][TOTAL_IDX] = 0
+                for _, y in ds:
+                    rhostat[y][TOTAL_IDX] += 1
             # compute the $\rho$ statistics and cross-validation/dev score anew
             dev_score = 0.
             for x_i, y_i in (a_devset or ds):
                 y_pred_i = self._predict(x_i)[0]
                 rhostat[y_i][PRDCT_IDX] += (y_pred_i == y_i)
+                dev_score += float(abs(self.int2coeff[y_i] -
+                                       self.int2coeff[y_pred_i[0]])) / \
+                    rhostat[y_i][TOTAL_IDX]
             dev_stat = [float(v[PRDCT_IDX])/float(v[TOTAL_IDX] or 1.)
                         for v in rhostat.itervalues()]
             # (used for two-class prediction)
-            dev_score = sum(dev_stat) / float(len(rhostat) or 1)
-            if dev_score > max_dev_score:
+            # dev_score = sum(dev_stat) / float(len(rhostat) or 1)
+            if dev_score < min_dev_score:
                 self._dump(a_path)
-                max_dev_score = dev_score
+                min_dev_score = dev_score
             end_time = datetime.utcnow()
             time_delta = (end_time - start_time).seconds
             print("dev_stat =", repr(dev_stat), file=sys.stderr)
@@ -768,8 +780,8 @@ class RNNModel(object):
                 break
             prev_cost = icost
         print("Minimum train cost = {:.10f}, "
-              "Maximum dev score = {:.10f}".format(min_train_cost,
-                                                   max_dev_score))
+              "Minimum dev score = {:.10f}".format(min_train_cost,
+                                                   min_dev_score))
         return icost
 
     def predict(self, a_seq):
@@ -783,7 +795,7 @@ class RNNModel(object):
         # a_seq[:0] = [BEG]; a_seq.append(END)
         self._activate_predict()
         y, score = self._predict(self._feat2idcs(a_seq))
-        self.int2lbl = {1: "positive", 0: "negative"}
+        # self.int2lbl = {1: "positive", 0: "negative"}
         return (self.int2lbl[int(y)], score)
 
     def debug(self, a_seq):
@@ -929,6 +941,10 @@ class RNNModel(object):
             # convert features to indices and append new training
             # instance
             ret.append((self._feat2idcs(iseq, a_add=a_add), dlabel))
+        # theano variant of int2coeff
+        self.int2coeff_th = theano.shared(
+            value=_floatX(self.int2coeff.values()),
+            name="int2coeff_th")
         return ret
 
     def _feat2idcs(self, a_seq, a_add=False, a_fill=True):
@@ -1317,8 +1333,10 @@ class RNNModel(object):
         (void)
 
         """
-        self.Y = TT.nnet.sigmoid(TT.sum(TT.dot(self.I1, self.I12Y) +
-                                        self.Y_BIAS))
+        self.Y = TT.nnet.softmax(TT.dot(self.I1, self.I12Y) +
+                                 self.Y_BIAS)
+        # self.Y = TT.nnet.sigmoid(TT.sum(TT.dot(self.I1, self.I12Y) +
+        #                                 self.Y_BIAS))
 
     def _init_dropout(self, a_input):
         """Create a dropout layer.
@@ -1351,9 +1369,10 @@ class RNNModel(object):
         if self._predict is None:
             # deactivate dropout when using the model
             self.use_dropout.set_value(0.)
+            self.y_pred = TT.argmax(self.Y, axis=1)
             self._predict = theano.function([self.CHAR_INDICES],
-                                            [self.Y >= 0.5,
-                                             self.Y],
+                                            [self.y_pred,
+                                             self.Y[0, self.y_pred]],
                                             name="predict")
 
     def _get_balance(self, a_ts, a_min, a_class2idcs,

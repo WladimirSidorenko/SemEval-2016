@@ -35,14 +35,14 @@ STOP_WORDS_RE = re.compile(r"(?:\b|^|-)(i|the(?:re|ir|[myn])?|"
                            "february|march|april|may|june|july|august|"
                            "september|october|november|december|nov|aug|"
                            "feb|sept|two)(?:[-:,.%$\"'`]+|'(?:s|ve))?"
-                           "(?=\s|[,?!]|\Z)")
-PUNCT_RE = re.compile("(\s|\A|\w)(?:-+|,+|:+|[.%$\"`]+)(?=\s|\w|\Z)")
+                           "(?=\s|[,?!]|\Z)", re.I)
+PUNCT_RE = re.compile("(\s|\A|\w)(?:-+|,+|:+|[.%$\"`]+)(?=\s|\w|\Z)", re.I)
 NEG_RE = re.compile("(?:\s|\A)(?:has|have|is|was|do|does|need|ca|"
-                    "wo|would)(n'?t)(?:\s|\Z)")
-AMP_RE = re.compile(r"&amp;")
-GT_RE = re.compile(r"&gt;")
-LT_RE = re.compile(r"&lt;")
-DIGIT_RE = re.compile(r"\b[\d:]+(?:[ap]\.?m\.?|th|rd|nd|m|b)?\b")
+                    "wo|would)(n'?t)(?:\s|\Z)", re.I)
+AMP_RE = re.compile(r"&amp;", re.I)
+GT_RE = re.compile(r"&gt;", re.I)
+LT_RE = re.compile(r"&lt;", re.I)
+DIGIT_RE = re.compile(r"\b[\d:]+(?:[ap]\.?m\.?|th|rd|nd|m|b)?\b", re.I)
 HTTP_RE = re.compile(r"(?:https?://\S*|\b(?:(?:[\w]{3,5}://?|(?:www|bit)"
                      "[.]|(?:\w[-\w]+[.])+(?:a(?:ero|sia|[c-gil-oq-uwxz])|"
                      "b(?:iz|[abd-jmnorstvwyz])|c(?:at|o(?:m|op)|"
@@ -53,14 +53,15 @@ HTTP_RE = re.compile(r"(?:https?://\S*|\b(?:(?:[\w]{3,5}://?|(?:www|bit)"
                      "[acdeghk-z])|n(?:ame|et|[acefgilopruz])|o(?:m|rg)|"
                      "p(?:ro|[ae-hk-nrstwy])|qa|r[eosuw]|s[a-eg-or-vxyz]|"
                      "t(?:(?:rav)?el|[cdfghj-pr])|xxx)\b)"
-                     "(?:[^\s,.:;]|\.\w)*))")
-AT_RE = re.compile(r"(RT\s+)?[.]?@\S+")
+                     "(?:[^\s,.:;]|\.\w)*))", re.I)
+AT_RE = re.compile(r"(RT\s+)?[.]?@\S+", re.I)
 SSPACE_RE = re.compile(r"\\\s+")
 SPACE_RE = re.compile(r"\s\s+")
 
 NONMATCH_RE = re.compile("(?!)")
 POS_RE = re.compile(r"[\b\A](amazing|better|best|cool|"
-                    "fun|fant|good|great|like|love|luv|wow|wonder\b|:\))")
+                    "fun|fant|good|great|like|love|luv|wow|wonder\b|:\))",
+                    re.I)
 POS_CHAR = ''
 NEG_CHAR = ''
 TOPIC2RE = {}
@@ -95,6 +96,7 @@ def _cleanse(a_line, a_topic=""):
 
     """
     global TOPIC2RE
+    # return a_line.lower()
     # print("original line =", repr(a_line), file = sys.stderr)
     line = _safe_sub(HTTP_RE, "", a_line.lower())
     line = _safe_sub(AT_RE, "", line)
@@ -108,7 +110,7 @@ def _cleanse(a_line, a_topic=""):
             TOPIC2RE[a_topic] = re.compile(r"\b" +
                                            SSPACE_RE.sub(r"\s+",
                                                          re.escape(a_topic)) +
-                                           r"\b")
+                                           r"\b", re.I)
         line = _safe_sub(TOPIC2RE[a_topic], "", line)
     line = _safe_sub(PUNCT_RE, "\\1 ", line)
     line = _safe_sub(SPACE_RE, ' ', line)
